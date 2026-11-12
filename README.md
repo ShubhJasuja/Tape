@@ -4,17 +4,17 @@ Tape is a local React trading terminal backed by Java 21, Spring Boot, and an em
 
 ## Run locally
 
-Install Java 21, Maven 3.6.3 or later, and Node.js 22. Run these commands from the project folder.
+Use Java 21 (Temurin in CI) and Node.js 22.23.1 with the bundled npm. The Maven Wrapper pins Maven 3.10.0 and downloads it on first use. On Linux or macOS, install unzip for the checksum-pinned wrapper distribution. Run these commands from the project folder.
 
 ```powershell
 cd frontend
 npm ci
 npm run build
 cd ..
-mvn spring-boot:run
+./mvnw.cmd spring-boot:run
 ```
 
-Open [the terminal](http://127.0.0.1:8080). Spring Boot serves the built frontend. For frontend development, leave Spring Boot running and use `npm run dev` inside `frontend`. Vite proxies the API to port 8080.
+Use `./mvnw` instead of `./mvnw.cmd` on Linux or macOS. Open [the terminal](http://127.0.0.1:8080). Spring Boot serves the built frontend. For frontend development, leave Spring Boot running and use `npm run dev` inside `frontend`. Vite proxies the API to port 8080.
 
 ## Live NSE and BSE data
 
@@ -46,6 +46,16 @@ flowchart LR
     Research --> LocalAI[Optional Ollama focus selection]
 ```
 
-Run `mvn test` to verify reservations, cancellations, idempotency, fill accounting, feed isolation and stock analysis. The app binds to loopback and is designed for a single local workspace. Public multi-user hosting would require authentication, durable per-user accounts, and verification of market-data redistribution rights. The checked-in code makes no broker order calls.
+Run `./mvnw.cmd clean verify` on Windows or `./mvnw --batch-mode clean verify` on Linux or macOS. The GitHub Actions workflow builds the locked frontend with `npm ci` and verifies the backend. Tests use in-memory H2 with Upstox and Ollama disabled. The characterization suite uses controlled quotes and runs matching explicitly. The app binds to loopback and is designed for a single local workspace. Public multi-user hosting would require authentication, durable per-user accounts, and verification of market-data redistribution rights. The checked-in code makes no broker order calls.
+
+## Back up the local H2 database
+
+When started from the project root with the default configuration, the database is at `data/tape.mv.db`. A datasource override or a different working directory can change that location.
+
+1. Stop Tape gracefully and confirm no process is using the database. H2 keeps this embedded database open while Tape runs. A direct copy of a live file is unsafe. H2's online backup requires a connection through the owning process, which Tape does not expose.
+2. Copy the closed file into a new private backup directory outside the Git workspace. On Windows, hold a read handle with `FileShare.Read` during the copy to prevent concurrent writers. If the handle cannot be acquired, defer the copy. Compare SHA-256 hashes of source and backup before restarting Tape.
+3. Make a disposable copy of the backup and open that copy with the same H2 version using `IFEXISTS=TRUE` and `ACCESS_MODE_DATA=r`. Check that both `paper_order` and `watchlist` can be read and reconcile order counts by mode with the expected totals. Retain the original backup separately. A matching hash verifies the copy, while opening and reading the disposable copy verifies it can be restored.
+
+See [ADR 0001](docs/adr/0001-account-storage-and-ledger.md) for the proposed PostgreSQL and multi-user design.
 
 **Resume bullet:** Built an Indian-equity paper trading terminal with React and Spring Boot, a persistent virtual order ledger, live quote integration, and local AI prioritization of verified stock and portfolio metrics.

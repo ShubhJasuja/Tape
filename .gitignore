@@ -5,3 +5,7 @@ data/
 .env*
 *.log
 .taste-skill/
+*.mv.db
+*.trace.db
+*.lock.db
+backups/

@@ -9,7 +9,11 @@ import org.springframework.web.server.ResponseStatusException;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-@SpringBootTest(properties = {"spring.datasource.url=jdbc:h2:mem:test-tape;DB_CLOSE_DELAY=-1", "UPSTOX_ANALYTICS_TOKEN="})
+@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.NONE, properties = {
+    "spring.datasource.url=jdbc:h2:mem:test-tape;DB_CLOSE_DELAY=-1",
+    "UPSTOX_ANALYTICS_TOKEN=",
+    "OLLAMA_MODEL="
+})
 class TradingTest {
     private static final String SYMBOL = "NSE:RELIANCE";
     @Autowired Trading trading;
