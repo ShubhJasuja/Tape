@@ -1,5 +1,6 @@
 package in.practice.tape;
 
+import org.springframework.context.annotation.Profile;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.web.bind.annotation.*;
@@ -9,6 +10,7 @@ import java.util.Map;
 import java.util.UUID;
 
 @RestController
+@Profile("!accounts")
 @RequestMapping("/api")
 class TerminalApi {
     private final Market market;

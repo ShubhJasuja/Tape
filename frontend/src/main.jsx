@@ -7,6 +7,7 @@ import '@fontsource/dm-sans/600.css';
 import '@fontsource/dm-sans/700.css';
 import '@fontsource/ibm-plex-mono/400.css';
 import './style.css';
+import TapeEntry from './accounts.jsx';
 
 const inr = new Intl.NumberFormat('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const price = n => n == null ? '—' : inr.format(n / 100);
@@ -323,4 +324,4 @@ function App() {
     </main>
   </>;
 }
-createRoot(document.getElementById('root')).render(<App/>);
+createRoot(document.getElementById('root')).render(<TapeEntry Terminal={App} />);

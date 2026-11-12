@@ -1,6 +1,6 @@
 # ADR 0001: PostgreSQL accounts and an immutable trading ledger
 
-Status: PostgreSQL schema foundation implemented in Stage 2A. Authentication, transaction changes and data cutover remain proposed for Stage 2B. The existing simulator and local terminal still use H2.
+Status: PostgreSQL schema foundation implemented in Stage 2A. Stage 2B adds server-side sessions and PostgreSQL account ownership. Trading transactions and data cutover remain proposed for Stage 2C. The existing simulator and local terminal still use H2.
 
 ## Context
 

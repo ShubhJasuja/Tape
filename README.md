@@ -16,6 +16,10 @@ cd ..
 
 Use `./mvnw` instead of `./mvnw.cmd` on Linux or macOS. Open [the terminal](http://127.0.0.1:8080). Spring Boot serves the built frontend. For frontend development, leave Spring Boot running and use `npm run dev` inside `frontend`. Vite proxies the API to port 8080.
 
+## Authenticated paper accounts
+
+The optional PostgreSQL workspace supports registration, sign-in, sign-out, and separate funded virtual accounts per user. Trading is unavailable in that workspace. The default loopback H2 terminal retains the existing simulator, charts, research and order flows. See the [authentication guide](docs/authentication.md) for profile setup and API contracts.
+
 ## Live NSE and BSE data
 
 Generate a free read-only [Upstox Analytics Token](https://upstox.com/developer/api-documentation/analytics-token/) in your Upstox Developer Apps account. Set it in your local environment as `UPSTOX_ANALYTICS_TOKEN` before starting Spring Boot. Restart the backend and select **Live data**. Keep the token out of Git, browser code, and screenshots.
@@ -46,7 +50,7 @@ flowchart LR
     Research --> LocalAI[Optional Ollama focus selection]
 ```
 
-Run `./mvnw.cmd clean verify` on Windows or `./mvnw --batch-mode clean verify` on Linux or macOS. The GitHub Actions workflow builds the locked frontend with `npm ci` and verifies the backend. The default suite uses in-memory H2. CI also runs the opt-in PostgreSQL schema suite. Both suites disable Upstox and Ollama. The characterization suite uses controlled quotes and runs matching explicitly. The app binds to loopback and is designed for a single local workspace. Public multi-user hosting would require authentication, durable per-user accounts, and verification of market-data redistribution rights. The checked-in code makes no broker order calls.
+Run `./mvnw.cmd clean verify` on Windows or `./mvnw --batch-mode clean verify` on Linux or macOS. The GitHub Actions workflow builds the locked frontend with `npm ci` and verifies the backend. The default suite uses in-memory H2. CI also runs the opt-in PostgreSQL schema suite. Both suites disable Upstox and Ollama. The characterization suite uses controlled quotes and runs matching explicitly. The legacy terminal binds to loopback and uses one shared local workspace. The PostgreSQL account workspace provides authentication and isolated balances. Public trading still requires account-scoped execution and verification of market-data rights. The checked-in code makes no broker order calls.
 
 ## Back up the local H2 database
 

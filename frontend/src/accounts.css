@@ -1,0 +1,20 @@
+.account-top { justify-content: space-between; }
+.account-session { display: flex; gap: 12px; align-items: center; min-width: 0; }
+.account-session span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
+.account-session button { flex-shrink: 0; }
+.account-page { max-width: 600px; padding-bottom: 24px; }
+.account-page > .quiet { margin-top: 10px; }
+.account-panel { padding: 24px; display: grid; gap: 16px; }
+.account-panel > .quiet { justify-self: start; }
+.account-form { padding: 0; }
+.account-form .primary { margin-top: 8px; }
+.account-select { display: grid; gap: 6px; max-width: 220px; }
+.account-select select { min-height: 36px; }
+.account-balances { display: grid; gap: 12px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.account-balances dt, .account-note { color: var(--muted); }
+.account-balances dd { margin-top: 4px; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+@media (max-width: 520px) {
+  .account-top .brand-sub { display: none; }
+  .account-panel { padding: 16px; }
+  .account-session { gap: 8px; }
+}
