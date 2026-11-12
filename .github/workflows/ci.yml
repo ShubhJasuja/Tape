@@ -34,4 +34,4 @@ jobs:
           java-version: '21'
           cache: maven
       - name: Verify Spring Boot backend
-        run: ./mvnw --batch-mode clean verify
+        run: ./mvnw --batch-mode clean verify -Dtape.postgres.tests=true

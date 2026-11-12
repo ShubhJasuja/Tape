@@ -1,0 +1,19 @@
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: tape
+      POSTGRES_USER: tape
+      POSTGRES_PASSWORD: ${TAPE_POSTGRES_PASSWORD:?Set TAPE_POSTGRES_PASSWORD in your environment}
+    ports:
+      - "127.0.0.1:${TAPE_POSTGRES_PORT:-5433}:5432"
+    volumes:
+      - tape-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "tape", "-d", "tape"]
+      interval: 3s
+      timeout: 3s
+      retries: 15
+
+volumes:
+  tape-postgres:

@@ -46,7 +46,7 @@ flowchart LR
     Research --> LocalAI[Optional Ollama focus selection]
 ```
 
-Run `./mvnw.cmd clean verify` on Windows or `./mvnw --batch-mode clean verify` on Linux or macOS. The GitHub Actions workflow builds the locked frontend with `npm ci` and verifies the backend. Tests use in-memory H2 with Upstox and Ollama disabled. The characterization suite uses controlled quotes and runs matching explicitly. The app binds to loopback and is designed for a single local workspace. Public multi-user hosting would require authentication, durable per-user accounts, and verification of market-data redistribution rights. The checked-in code makes no broker order calls.
+Run `./mvnw.cmd clean verify` on Windows or `./mvnw --batch-mode clean verify` on Linux or macOS. The GitHub Actions workflow builds the locked frontend with `npm ci` and verifies the backend. The default suite uses in-memory H2. CI also runs the opt-in PostgreSQL schema suite. Both suites disable Upstox and Ollama. The characterization suite uses controlled quotes and runs matching explicitly. The app binds to loopback and is designed for a single local workspace. Public multi-user hosting would require authentication, durable per-user accounts, and verification of market-data redistribution rights. The checked-in code makes no broker order calls.
 
 ## Back up the local H2 database
 
@@ -56,6 +56,6 @@ When started from the project root with the default configuration, the database 
 2. Copy the closed file into a new private backup directory outside the Git workspace. On Windows, hold a read handle with `FileShare.Read` during the copy to prevent concurrent writers. If the handle cannot be acquired, defer the copy. Compare SHA-256 hashes of source and backup before restarting Tape.
 3. Make a disposable copy of the backup and open that copy with the same H2 version using `IFEXISTS=TRUE` and `ACCESS_MODE_DATA=r`. Check that both `paper_order` and `watchlist` can be read and reconcile order counts by mode with the expected totals. Retain the original backup separately. A matching hash verifies the copy, while opening and reading the disposable copy verifies it can be restored.
 
-See [ADR 0001](docs/adr/0001-account-storage-and-ledger.md) for the proposed PostgreSQL and multi-user design.
+See the [database guide](docs/database.md) for the Stage 2A PostgreSQL profile, migrations and tests, and [ADR 0001](docs/adr/0001-account-storage-and-ledger.md) for the multi-user design.
 
 **Resume bullet:** Built an Indian-equity paper trading terminal with React and Spring Boot, a persistent virtual order ledger, live quote integration, and local AI prioritization of verified stock and portfolio metrics.
