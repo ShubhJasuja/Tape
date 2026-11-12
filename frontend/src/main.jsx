@@ -1,0 +1,326 @@
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { createRoot } from 'react-dom/client';
+import { Activity, ArrowDownToLine, ArrowDownUp, ChartCandlestick, CircleHelp, Clock3, FlaskConical, Layers3, ListOrdered, Search, Star } from 'lucide-react';
+import '@fontsource/dm-sans/400.css';
+import '@fontsource/dm-sans/500.css';
+import '@fontsource/dm-sans/600.css';
+import '@fontsource/dm-sans/700.css';
+import '@fontsource/ibm-plex-mono/400.css';
+import './style.css';
+
+const inr = new Intl.NumberFormat('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const price = n => n == null ? '—' : inr.format(n / 100);
+const money = n => n == null ? '—' : '₹' + price(n);
+const ticker = s => s.split(':')[1];
+const exchange = s => s.split(':')[0];
+const ist = new Intl.DateTimeFormat('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+const dates = new Intl.DateTimeFormat('en-IN', { day: 'numeric', month: 'short', timeZone: 'UTC' });
+const day = s => dates.format(new Date(s + 'T00:00:00Z'));
+const query = params => new URLSearchParams(params);
+const tone = n => n > 0 ? 'up' : n < 0 ? 'down' : '';
+async function api(path, options) {
+  const res = await fetch('/api' + path, options);
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.message || 'The request failed. Please try again.');
+  }
+  const raw = await res.text();
+  return raw ? JSON.parse(raw) : null;
+}
+
+function Chart({ candles, symbol }) {
+  const canvas = useRef(null);
+  const [hover, setHover] = useState(null);
+  const hovered = candles[hover] || candles.at(-1);
+  useEffect(() => {
+    setHover(null);
+  }, [candles, symbol]);
+  useEffect(() => {
+    const el = canvas.current;
+    if (!el || !candles.length) return;
+    function paint() {
+      const { width: w, height: h } = el.getBoundingClientRect();
+      if (w < 100 || h < 100) return;
+      const dpr = window.devicePixelRatio || 1;
+      el.width = w * dpr;
+      el.height = h * dpr;
+      const ctx = el.getContext('2d');
+      ctx.scale(dpr, dpr);
+      const right = w - 78, bottom = h - 28, top = 15, left = 9;
+      const step = (right - left) / candles.length;
+      const min = Math.min(...candles.map(c => c.low));
+      const max = Math.max(...candles.map(c => c.high));
+      const pad = Math.max((max - min) * .12, 1);
+      const y = value => top + (max + pad - value) / (max - min + 2 * pad) * (bottom - top - 49);
+      const maxVolume = Math.max(1, ...candles.map(c => c.volume));
+      ctx.font = '11px "IBM Plex Mono", monospace';
+      ctx.textBaseline = 'middle';
+      for (let n = 0; n < 5; n++) {
+        const value = min - pad + (max - min + 2 * pad) * n / 4;
+        const at = y(value);
+        ctx.fillStyle = '#262b32';
+        ctx.fillRect(left, at, right - left, 1);
+        ctx.fillStyle = '#a5afbe';
+        ctx.fillText(price(value), right + 9, at);
+      }
+      candles.forEach((c, n) => {
+        const x = left + step * (n + .5);
+        const width = Math.max(1, Math.min(step * .68, 15));
+        const color = c.close >= c.open ? '#65bfa4' : '#dd8490';
+        ctx.fillStyle = color;
+        ctx.fillRect(x - .5, y(c.high), 1, Math.max(1, y(c.low) - y(c.high)));
+        ctx.fillRect(x - width / 2, y(Math.max(c.open, c.close)), width, Math.max(1, Math.abs(y(c.open) - y(c.close))));
+        ctx.globalAlpha = .27;
+        const volume = c.volume / maxVolume * 34;
+        ctx.fillRect(x - width / 2, bottom - volume, width, volume);
+        ctx.globalAlpha = 1;
+      });
+      const ticks = w < 420 ? 3 : 5;
+      ctx.fillStyle = '#a5afbe';
+      ctx.textAlign = 'center';
+      for (let n = 0; n < ticks; n++) {
+        const index = Math.round((candles.length - 1) * n / (ticks - 1));
+        const x = Math.max(23, Math.min(right - 12, left + step * (index + .5)));
+        ctx.fillText(day(candles[index].date), x, h - 12);
+      }
+      if (hover != null && candles[hover]) {
+        const x = left + step * (hover + .5);
+        ctx.fillStyle = '#a1bde2';
+        ctx.fillRect(x, top, 1, bottom - top);
+      }
+    }
+    const observer = new ResizeObserver(paint);
+    observer.observe(el);
+    document.fonts.ready.then(paint);
+    return () => observer.disconnect();
+  }, [candles, hover]);
+  return <>
+    <div className="ohlc mono">{hovered ? <><span>{day(hovered.date)}</span>{[['O', 'open'], ['H', 'high'], ['L', 'low'], ['C', 'close']].map(([label, key]) =>
+      <span key={key}>{label} <b>{price(hovered[key])}</b></span>)}</> : 'Daily OHLC'}</div>
+    {candles.length ? <canvas ref={canvas} role="img" aria-label={ticker(symbol) + ' daily candlestick and volume chart'}
+      onPointerMove={e => {
+        const rect = e.currentTarget.getBoundingClientRect();
+        const index = Math.floor((e.clientX - rect.left - 9) / (rect.width - 87) * candles.length);
+        setHover(index >= 0 && index < candles.length ? index : null);
+      }} onPointerLeave={() => setHover(null)} /> : <div className="empty-chart">Daily candles are unavailable for this feed.</div>}
+  </>;
+}
+
+function App() {
+  const [mode, setMode] = useState('demo');
+  const [symbol, setSymbol] = useState('NSE:RELIANCE');
+  const [terminal, setTerminal] = useState(null);
+  const [error, setError] = useState('');
+  const [search, setSearch] = useState('');
+  const [pinnedOnly, setPinnedOnly] = useState(false);
+  const [range, setRange] = useState(30);
+  const [series, setSeries] = useState(null);
+  const [side, setSide] = useState('BUY');
+  const [kind, setKind] = useState('MARKET');
+  const [quantity, setQuantity] = useState('1');
+  const [trigger, setTrigger] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [orderMessage, setOrderMessage] = useState('');
+  const [accountTab, setAccountTab] = useState('Positions');
+  const [report, setReport] = useState(null);
+  const [analysisBusy, setAnalysisBusy] = useState(false);
+  const [analysisError, setAnalysisError] = useState('');
+  const retry = useRef(null);
+
+  const refresh = useCallback(async signal => {
+    try {
+      const data = await api('/terminal?' + query({ mode }), { signal });
+      if (!signal?.aborted) { setTerminal(data); setError(''); }
+    } catch (e) {
+      if (e.name !== 'AbortError') setError(e.message);
+    }
+  }, [mode]);
+  useEffect(() => {
+    const controller = new AbortController();
+    refresh(controller.signal);
+    const timer = setInterval(() => refresh(controller.signal), 3000);
+    return () => { clearInterval(timer); controller.abort(); };
+  }, [refresh]);
+  useEffect(() => {
+    const controller = new AbortController();
+    api('/candles?' + query({ mode, symbol }), { signal: controller.signal })
+      .then(data => setSeries({ mode, symbol, data }))
+      .catch(e => { if (e.name !== 'AbortError') setSeries({ mode, symbol, data: [] }); });
+    return () => controller.abort();
+  }, [mode, symbol]);
+
+  const active = terminal?.feed.mode === mode ? terminal : null;
+  const account = active?.account;
+  const instrument = active?.instruments.find(i => i.symbol === symbol);
+  const quote = active?.feed.quotes[symbol];
+  const candles = React.useMemo(() => series?.mode === mode && series.symbol === symbol ? series.data.slice(-range) : [],
+    [series, mode, symbol, range]);
+  const watched = active?.watchlist.includes(symbol);
+  const tradeable = active?.tradeable.includes(symbol);
+  const working = account?.orders.filter(o => o.status === 'OPEN') || [];
+  const visibleReport = report?.mode === mode && (report.symbol == null || report.symbol === symbol) ? report.data : null;
+  const rows = active?.instruments.filter(i => (!pinnedOnly || active.watchlist.includes(i.symbol)) &&
+    (i.symbol + ' ' + i.name).toLowerCase().includes(search.trim().toLowerCase())) || [];
+  const unit = kind === 'MARKET' ? quote?.price : Math.round(Number(trigger) * 100);
+  const notional = unit > 0 && Number.isInteger(Number(quantity)) && Number(quantity) > 0 ? unit * Number(quantity) : null;
+  const estFee = notional == null ? null : Math.ceil(notional / 2000);
+
+  async function submit(e) {
+    e.preventDefault();
+    const ticket = { symbol, side, kind, quantity: Number(quantity), trigger: kind === 'MARKET' ? null : Number(trigger) };
+    const fingerprint = JSON.stringify({ mode, ticket });
+    if (retry.current?.fingerprint !== fingerprint) retry.current = { fingerprint, id: crypto.randomUUID() };
+    setBusy(true);
+    setOrderMessage('');
+    try {
+      const result = await api('/orders?' + query({ mode }), { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...ticket, id: retry.current.id }) });
+      retry.current = null;
+      setOrderMessage(result.status === 'FILLED' ? 'Filled at ' + money(result.fill) + '.' : 'Order is ' + result.status.toLowerCase() + '.');
+      setAccountTab(result.status === 'OPEN' ? 'Orders' : 'Positions');
+      await refresh();
+    } catch (e) { setOrderMessage(e.message); }
+    finally { setBusy(false); }
+  }
+
+  async function cancel(id) {
+    setBusy(true);
+    try {
+      await api('/orders/' + id + '?' + query({ mode }), { method: 'DELETE' });
+      setOrderMessage('Order cancelled.');
+      await refresh();
+    } catch (e) { setOrderMessage(e.message); }
+    finally { setBusy(false); }
+  }
+
+  async function pin() {
+    try {
+      await api('/watchlist?' + query({ symbol, pinned: !watched }), { method: 'PUT' });
+      await refresh();
+    } catch (e) { setError(e.message); }
+  }
+
+  async function analyze(target) {
+    setAnalysisBusy(true);
+    setAnalysisError('');
+    setReport(null);
+    try {
+      const params = target === 'stock' ? { mode, symbol } : { mode };
+      const data = await api('/research?' + query(params));
+      setReport({ mode, symbol: params.symbol, data });
+    } catch (e) { setAnalysisError(e.message); }
+    finally { setAnalysisBusy(false); }
+  }
+
+  function download() {
+    const header = 'id,symbol,side,kind,quantity,status,trigger_inr,fill_inr,fee_inr,created_utc';
+    const values = (account?.orders || []).map(o => [o.id, o.symbol, o.side, o.kind, o.quantity, o.status,
+      o.trigger == null ? '' : o.trigger / 100, o.fill == null ? '' : o.fill / 100, o.fee == null ? '' : o.fee / 100,
+      new Date(o.created).toISOString()].join(','));
+    const url = URL.createObjectURL(new Blob([[header, ...values].join('\n')], { type: 'text/csv;charset=utf-8' }));
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'tape-' + mode + '-orders.csv';
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  return <>
+    <header className="top">
+      <a className="brand" href="#terminal"><span className="brand-mark"><Activity size={23}/></span> Tape <span className="brand-sub">PAPER TRADING</span></a>
+      <nav aria-label="Workspace"><a href="#terminal">Terminal</a><a href="#portfolio">Portfolio</a><a href="#research">Research</a></nav>
+      <div className="mode" aria-label="Market data mode">
+        {['demo','live'].map(m => <button key={m} aria-pressed={mode === m} className={mode === m ? 'selected' : ''}
+          disabled={busy} onClick={() => { setMode(m); setOrderMessage(''); setAnalysisError(''); }}>{m === 'demo' ? 'Demo' : 'Live data'}</button>)}
+      </div>
+    </header>
+    <main id="terminal">
+      <div className="heading">
+        <div><h1>Trading terminal</h1><p>NSE &amp; BSE equities <span className="separator">/</span> Virtual account</p></div>
+        <div className="feed"><span className={'dot ' + (tradeable ? 'ready' : '')}/>{active?.feed.status || 'Connecting'}{quote && <span className="muted mono"> · {ist.format(quote.time)} IST</span>}</div>
+      </div>
+      {error && <div className="notice" role="alert">{error}</div>}
+      {mode === 'live' && active && !active.liveConfigured && <div className="notice"><CircleHelp size={16}/> Set UPSTOX_ANALYTICS_TOKEN on the Spring Boot server to connect live data.</div>}
+      <div className="terminal-grid">
+        <section className="panel markets" aria-label="Market watch">
+          <div className="panel-title"><Layers3 size={16}/> <h2>Market watch</h2></div>
+          <label className="search"><Search size={16}/><input aria-label="Search symbols" placeholder="Find a symbol" value={search} onChange={e => setSearch(e.target.value)}/></label>
+          <div className="tabs watch-tabs"><button className={!pinnedOnly ? 'selected' : ''} onClick={() => setPinnedOnly(false)}>All stocks</button>
+            <button className={pinnedOnly ? 'selected' : ''} onClick={() => setPinnedOnly(true)}>Watchlist</button></div>
+          <div className="market-columns muted"><span>Symbol</span><span>Last / Change</span></div>
+          <div className="market-rows">{rows.map(i => {
+            const q = active.feed.quotes[i.symbol];
+            const pct = q && q.price !== q.change ? q.change / (q.price - q.change) * 100 : null;
+            return <button key={i.symbol} className={'stock ' + (symbol === i.symbol ? 'active-stock' : '')} aria-pressed={symbol === i.symbol}
+              onClick={() => { setSymbol(i.symbol); setOrderMessage(''); }}>
+              <span><strong>{ticker(i.symbol)}</strong><small>{exchange(i.symbol)} · {i.name}</small></span>
+              <span className="mono">{price(q?.price)}<small className={tone(pct)}>{pct == null ? '—' : (pct > 0 ? '+' : '') + pct.toFixed(2) + '%'}</small></span>
+            </button>;
+          })}
+          {!rows.length && <p className="empty">{active ? 'No matching symbols.' : 'Loading symbols…'}</p>}</div>
+        </section>
+
+        <section className="panel chart" aria-label="Price chart">
+          <div className="chart-title"><div><div className="instrument"><h2>{ticker(symbol)}</h2><span>{exchange(symbol)}</span></div>
+            <div className="muted">{instrument?.name || 'Equity'}</div></div>
+            <button className="icon-button" aria-label={watched ? 'Remove from watchlist' : 'Add to watchlist'} aria-pressed={!!watched} onClick={pin} disabled={!active}><Star size={17} fill={watched ? 'currentColor' : 'none'}/></button>
+          </div>
+          <div className="quote"><strong className="mono">{money(quote?.price)}</strong>
+            {quote && <span className={'mono ' + tone(quote.change)}>{quote.change > 0 ? '+' : quote.change < 0 ? '−' : ''}{money(Math.abs(quote.change))} <span className="muted">vs prev. close</span></span>}</div>
+          <div className="chart-tools"><span><ChartCandlestick size={15}/> Daily candles</span><div className="tabs">
+            {[['30D',30], ['60D',60], ['90D',90]].map(([label,n]) => <button key={n} title={n + " trading sessions"} className={range === n ? 'selected' : ''} aria-pressed={range === n} onClick={() => setRange(n)}>{label}</button>)}
+          </div></div>
+          <Chart candles={candles} symbol={symbol}/>
+          <div className="chart-footer"><span><i/> Volume</span><span>{mode === 'demo' ? 'Synthetic prices' : tradeable ? 'Upstox' : 'Upstox · Last available'} · INR</span></div>
+        </section>
+
+        <section className="panel ticket" aria-label="Order ticket">
+          <div className="panel-title"><ArrowDownUp size={16}/><h2>Order ticket</h2></div>
+          <div className="ticket-symbol"><strong>{ticker(symbol)}</strong><span>{exchange(symbol)} · Equity</span></div>
+          <form onSubmit={submit}>
+            <div className="side tabs">{['BUY','SELL'].map(s => <button type="button" key={s} className={side === s ? 'selected' : ''} aria-pressed={side === s} onClick={() => setSide(s)}>{s === 'BUY' ? 'Buy' : 'Sell'}</button>)}</div>
+            <label>Order type<select value={kind} onChange={e => setKind(e.target.value)}><option value="MARKET">Market</option><option value="LIMIT">Limit</option><option value="STOP">Stop market</option></select></label>
+            <label>Quantity<input type="number" min="1" max="100000" step="1" required value={quantity} onChange={e => setQuantity(e.target.value)}/></label>
+            {kind !== 'MARKET' && <label>{kind === 'LIMIT' ? 'Limit price (₹)' : 'Stop trigger (₹)'}<input type="number" min="0.01" max="1000000" step="0.01" required value={trigger} onChange={e => setTrigger(e.target.value)}/></label>}
+            <dl className="est"><div><dt>Order value</dt><dd>{money(notional)}</dd></div><div><dt>Estimated fee</dt><dd>{money(estFee)}</dd></div><div><dt>Buying power</dt><dd>{money(account?.available)}</dd></div></dl>
+            <button className="primary" disabled={busy || !active || (mode === "live" && !active.liveConfigured) || (kind === 'MARKET' && (!tradeable || !!error))}>{busy ? 'Submitting…' : 'Place paper ' + side.toLowerCase()}</button>
+            <p className="ticket-note">{kind === 'MARKET' && !tradeable ? 'Waiting for a tradeable quote.' : 'Fills use virtual funds and simulated fees.'}</p>
+            {orderMessage && <p className="feedback" role="status">{orderMessage}</p>}
+          </form>
+        </section>
+      </div>
+      <div className="lower-grid">
+        <section className="panel portfolio" id="portfolio">
+          <div className="panel-title"><ListOrdered size={16}/><h2>Paper portfolio</h2><button className="quiet export" disabled={!account?.orders.length} onClick={download}><ArrowDownToLine size={14}/> CSV</button></div>
+          <div className="balances">{[['Equity',account?.equity],['Available cash',account?.available],['Unrealized P&L',account?.unrealized],['Realized P&L',account?.realized]].map(([label,v]) =>
+            <div key={label}><span>{label}</span><strong className="mono">{money(v)}</strong></div>)}</div>
+          <div className="tabs account-tabs">{['Positions', 'Orders'].map(t => <button key={t} className={accountTab === t ? 'selected' : ''} onClick={() => setAccountTab(t)}>{t} <span>{t === 'Orders' ? working.length + ' open' : account?.holdings.length ?? 0}</span></button>)}</div>
+          <div className="table-scroll">
+            {accountTab === 'Positions' ? <table><thead><tr><th>Symbol</th><th>Shares</th><th>Avg. cost</th><th>Market value</th><th>P&L</th></tr></thead><tbody>
+              {account?.holdings.map(h => <tr key={h.symbol}><th scope="row">{h.symbol}</th><td>{h.quantity}</td><td>{money(h.cost / h.quantity)}</td><td>{money(h.value)}</td><td className={tone(h.pnl)}>{money(h.pnl)}</td></tr>)}
+              {!account?.holdings.length && <tr><td colSpan="5" className="empty">Your filled positions will appear here.</td></tr>}
+            </tbody></table> : <table><thead><tr><th>Symbol</th><th>Order</th><th>Shares</th><th>Price</th><th>Status</th></tr></thead><tbody>
+              {account?.orders.map(o => <tr key={o.id}><th scope="row">{o.symbol}</th><td>{o.side} {o.kind}</td><td>{o.quantity}</td><td>{money(o.fill ?? o.trigger)}</td><td>{o.status === 'OPEN' ? <button className="quiet" disabled={busy} onClick={() => cancel(o.id)} aria-label={'Cancel order for ' + o.symbol}>Cancel</button> : o.status}</td></tr>)}
+              {!account?.orders.length && <tr><td colSpan="5" className="empty">No paper orders yet.</td></tr>}
+            </tbody></table>}
+          </div>
+        </section>
+        <section className="panel research" id="research">
+          <div className="panel-title"><FlaskConical size={16}/><h2>Research lab</h2></div>
+          <p className="muted">Explore price behavior, portfolio exposure and risk metrics.</p>
+          <div className="research-actions"><button className="quiet" disabled={analysisBusy || !active} onClick={() => analyze('stock')}>Analyze {ticker(symbol)}</button>
+            <button className="quiet" disabled={analysisBusy || !active} onClick={() => analyze('portfolio')}>Analyze portfolio</button></div>
+          {analysisBusy && <p className="muted" role="status">Calculating observations…</p>}
+          {analysisError && <p role="alert">{analysisError}</p>}
+          {visibleReport ? <div className="report" aria-live="polite"><small>{visibleReport.subject} · {visibleReport.source}</small>
+            {visibleReport.observations.map(o => <div key={o.id} className={o.id === visibleReport.focus ? 'observation focus' : 'observation'}>
+              <div><strong>{o.label}</strong><b className="mono">{o.value}</b></div><p>{o.detail}</p></div>)}
+            {!visibleReport.observations.length && <p className="muted">There is insufficient market data for this report.</p>}
+          </div> : !analysisBusy && <div className="research-note"><Clock3 size={15}/> Observations use available data and explain how each metric is calculated.</div>}
+        </section>
+      </div>
+      <footer>Tape · Paper trading workspace <span>All balances and orders are simulated.</span></footer>
+    </main>
+  </>;
+}
+createRoot(document.getElementById('root')).render(<App/>);

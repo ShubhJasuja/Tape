@@ -1,0 +1,1 @@
+{"name":"tape-terminal","private":true,"type":"module","scripts":{"dev":"vite --host 127.0.0.1","build":"vite build"},"dependencies":{"react":"^19.2.0","react-dom":"^19.2.0","lucide-react":"^0.468.0","@fontsource/dm-sans":"^5.2.0","@fontsource/ibm-plex-mono":"^5.2.0"},"devDependencies":{"vite":"^7.3.0"}}
