@@ -96,25 +96,28 @@ class PaperOrders {
             Wallet wallet = lock(owner, account);
             var existing = find(account, " AND o.idempotency_key=?", ticket.idempotencyKey());
             if (existing != null) {
-                if (existing.symbol().equals(ticket.symbol()) && existing.side().equals(ticket.side())
+                String requested = db.queryForObject("SELECT requested_symbol FROM orders WHERE account_id=? AND id=?",
+                    String.class, account, existing.id());
+                if (Objects.requireNonNullElse(requested, existing.symbol()).equals(ticket.symbol()) && existing.side().equals(ticket.side())
                     && existing.kind().equals(ticket.kind()) && existing.quantity() == ticket.quantity()
                     && Objects.equals(existing.triggerPaise(), trigger)) return existing;
                 throw error(HttpStatus.CONFLICT, "IDEMPOTENCY_CONFLICT");
             }
-            UUID instrument = instrumentId(ticket.symbol());
+            var listing = executionInstrument(ticket.symbol());
+            UUID instrument = listing.id();
             Instant now = Instant.now();
             boolean immediate = "MARKET".equals(ticket.kind());
-            var quote = immediate ? quotes.latest(ticket.symbol(), now) : null;
+            var quote = immediate ? quotes.latest(listing.key(), now) : null;
             if (immediate && !SyntheticQuotes.eligible(quote, now)) {
                 throw error(HttpStatus.SERVICE_UNAVAILABLE, "QUOTE_UNAVAILABLE");
             }
             UUID id = UUID.randomUUID();
             db.update("""
                 INSERT INTO orders (id,account_id,instrument_id,idempotency_key,side,kind,quantity,
-                    trigger_price_paise,status,created_at,updated_at)
-                VALUES (?,?,?,?,?,?,?,?,'OPEN',?,?)
+                    trigger_price_paise,status,created_at,updated_at,requested_symbol)
+                VALUES (?,?,?,?,?,?,?,?,'OPEN',?,?,?)
                 """, id, account, instrument, ticket.idempotencyKey(), ticket.side(), ticket.kind(),
-                ticket.quantity(), trigger, Timestamp.from(now), Timestamp.from(now));
+                ticket.quantity(), trigger, Timestamp.from(now), Timestamp.from(now), ticket.symbol());
             Order order = requireOrder(account, id);
             Position position = position(account, instrument);
             if (immediate) {
@@ -171,7 +174,11 @@ class PaperOrders {
             Order order = requireOrder(account, candidate.order());
             if (!order.open() || "MARKET".equals(order.kind())) return;
             Instant now = Instant.now();
-            var quote = quotes.latest(order.symbol(), now);
+            var keys = db.queryForList("""
+                SELECT synthetic_key FROM instruments WHERE id=? AND listing_status='ACTIVE' AND synthetic_key IS NOT NULL
+                """, String.class, order.instrumentId());
+            if (keys.isEmpty()) return; // Keep the reservation until cancellation or reactivation.
+            var quote = quotes.latest(keys.getFirst(), now);
             if (!SyntheticQuotes.eligible(quote, now) || quote.time() < order.createdAt().toEpochMilli()
                 || !order.crosses(quote.price())) return;
             Position position = position(account, order.instrumentId());
@@ -282,10 +289,25 @@ class PaperOrders {
             """, account, instrument, quantity, reserved, cost);
     }
 
-    UUID instrumentId(String symbol) {
-        var instrument = Market.instrument(symbol);
-        String[] parts = instrument.symbol().split(":", 2);
-        return db.queryForObject("SELECT id FROM instruments WHERE exchange=? AND symbol=?", UUID.class, parts[0], parts[1]);
+    record ExecutionInstrument(UUID id, String key, String status) {}
+
+    private ExecutionInstrument executionInstrument(String symbol) {
+        var instrument = lookupInstrument(symbol);
+        if (instrument.key() == null || !"ACTIVE".equals(instrument.status())) {
+            throw error(HttpStatus.CONFLICT, "INSTRUMENT_NOT_TRADABLE");
+        }
+        return instrument;
+    }
+
+    private ExecutionInstrument lookupInstrument(String symbol) {
+        if (symbol == null || !symbol.matches("(NSE|BSE):[A-Z0-9&._-]{1,32}")) {
+            throw error(HttpStatus.BAD_REQUEST, "INVALID_INSTRUMENT");
+        }
+        String[] parts = symbol.split(":", 2);
+        return db.query("SELECT id,synthetic_key,listing_status FROM instruments WHERE exchange=? AND symbol=?",
+            (rs, row) -> new ExecutionInstrument(rs.getObject(1, UUID.class), rs.getString(2), rs.getString(3)),
+            parts[0], parts[1]).stream().findFirst()
+            .orElseThrow(() -> error(HttpStatus.NOT_FOUND, "INSTRUMENT_NOT_FOUND"));
     }
 
     Order detail(UUID owner, UUID account, UUID id) {
@@ -320,13 +342,14 @@ class PaperOrders {
             Wallet wallet = readWallet(account, false);
             Instant now = Instant.now();
             var positions = db.query("""
-                SELECT i.exchange || ':' || i.symbol, p.quantity,p.reserved_quantity,p.cost_paise
+                SELECT i.exchange || ':' || i.symbol, p.quantity,p.reserved_quantity,p.cost_paise,i.synthetic_key
                 FROM positions p JOIN instruments i ON i.id=p.instrument_id
                 WHERE p.account_id=? AND p.quantity>0 ORDER BY 1
                 """, (rs, row) -> {
                     String symbol = rs.getString(1);
                     long quantity = rs.getLong(2), reserved = rs.getLong(3), cost = rs.getLong(4);
-                    Market.Quote quote = quotes.latest(symbol, now);
+                    String key = rs.getString(5);
+                    Market.Quote quote = key == null ? null : quotes.latest(key, now);
                     if (!SyntheticQuotes.eligible(quote, now)) throw error(HttpStatus.SERVICE_UNAVAILABLE, "QUOTE_UNAVAILABLE");
                     long value = bounded(gross(quote.price(), quantity));
                     return new Holding(symbol, quantity, reserved, subtractExact(quantity, reserved), cost, quote.price(),
@@ -352,9 +375,19 @@ class PaperOrders {
     }
 
     void pin(UUID owner, UUID account, String symbol, boolean pinned) {
+        pin(owner, account, symbol, null, pinned);
+    }
+
+    void pin(UUID owner, UUID account, String symbol, UUID instrumentId, boolean pinned) {
         writes.executeWithoutResult(ignored -> {
             lock(owner, account);
-            UUID instrument = instrumentId(symbol);
+            var listing = instrumentId == null ? lookupInstrument(symbol) : db.query(
+                "SELECT id,synthetic_key,listing_status FROM instruments WHERE id=?",
+                (rs, row) -> new ExecutionInstrument(rs.getObject(1, UUID.class), rs.getString(2), rs.getString(3)),
+                instrumentId).stream().findFirst()
+                .orElseThrow(() -> error(HttpStatus.NOT_FOUND, "INSTRUMENT_NOT_FOUND"));
+            UUID instrument = listing.id();
+            if (pinned && !"ACTIVE".equals(listing.status())) throw error(HttpStatus.CONFLICT, "INSTRUMENT_INACTIVE");
             if (pinned) {
                 db.update("INSERT INTO watchlists (id,user_id,name) VALUES (?,?,'Default') ON CONFLICT DO NOTHING",
                     UUID.randomUUID(), owner);
@@ -502,7 +535,7 @@ class PaperOrders {
         if (ticket == null || ticket.idempotencyKey() == null || ticket.quantity() < 1 || ticket.quantity() > 100_000 ||
             !("BUY".equals(ticket.side()) || "SELL".equals(ticket.side())) ||
             !("MARKET".equals(ticket.kind()) || "LIMIT".equals(ticket.kind()) || "STOP".equals(ticket.kind())) ||
-            Market.INSTRUMENTS.stream().noneMatch(i -> i.symbol().equals(ticket.symbol()))) {
+            ticket.symbol() == null || !ticket.symbol().matches("(NSE|BSE):[A-Z0-9&._-]{1,32}")) {
             throw error(HttpStatus.BAD_REQUEST, "INVALID_TICKET");
         }
         if ("MARKET".equals(ticket.kind())) {

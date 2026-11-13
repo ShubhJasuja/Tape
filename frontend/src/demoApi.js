@@ -1,4 +1,6 @@
 const messages = {
+  INSTRUMENT_NOT_TRADABLE: "Demo trading is unavailable for this listing.",
+  INSTRUMENT_INACTIVE: "Inactive listings cannot be added to a watchlist.",
   IDEMPOTENCY_CONFLICT: 'This request key belongs to a different order.',
   QUOTE_UNAVAILABLE: 'No fresh synthetic quote is available. Try again shortly.',
   INSUFFICIENT_CASH: 'Insufficient available cash.',

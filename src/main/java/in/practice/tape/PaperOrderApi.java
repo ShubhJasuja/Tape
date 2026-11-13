@@ -21,7 +21,7 @@ import java.util.UUID;
 @Profile("accounts")
 @RequestMapping("/api/v1/accounts/{account}")
 class PaperOrderApi {
-    record Pin(String symbol, boolean pinned) {}
+    record Pin(String symbol, UUID instrumentId, boolean pinned) {}
     record Listing(String symbol, String name) {}
     record MarketView(List<Listing> instruments, java.util.Map<String, Market.Quote> quotes, List<String> watchlist) {}
 
@@ -29,13 +29,15 @@ class PaperOrderApi {
     private final JdbcTemplate db;
     private final SyntheticQuotes quotes;
     private final Market market;
+    private final InstrumentCatalog catalog;
     private final TradingMetrics metrics;
 
-    PaperOrderApi(PaperOrders orders, JdbcTemplate db, SyntheticQuotes quotes, Market market, TradingMetrics metrics) {
+    PaperOrderApi(PaperOrders orders, JdbcTemplate db, SyntheticQuotes quotes, Market market, TradingMetrics metrics, InstrumentCatalog catalog) {
         this.orders = orders;
         this.db = db;
         this.quotes = quotes;
         this.market = market;
+        this.catalog = catalog;
         this.metrics = metrics;
     }
 
@@ -94,8 +96,8 @@ class PaperOrderApi {
     @GetMapping("/market")
     MarketView market(@AuthenticationPrincipal AccountDirectory.Principal user, @PathVariable UUID account) {
         return orders.owned(user.userId(), account, () -> new MarketView(
-            Market.INSTRUMENTS.stream().map(i -> new Listing(i.symbol(), i.name())).toList(),
-            quotes.snapshot(Instant.now()), db.queryForList("""
+            catalog.syntheticListings().stream().map(i -> new Listing(i.symbol(), i.name())).toList(),
+            catalog.quotes(quotes, Instant.now()), db.queryForList("""
                 SELECT i.exchange || ':' || i.symbol FROM watchlists w
                 JOIN watchlist_items wi ON wi.watchlist_id=w.id JOIN instruments i ON i.id=wi.instrument_id
                 WHERE w.user_id=? AND w.name='Default' ORDER BY 1
@@ -105,14 +107,38 @@ class PaperOrderApi {
     @GetMapping("/candles")
     List<Market.Candle> candles(@AuthenticationPrincipal AccountDirectory.Principal user, @PathVariable UUID account,
                                 @RequestParam String symbol) {
-        return orders.owned(user.userId(), account, () -> market.candles("demo", Market.instrument(symbol)));
+        return orders.owned(user.userId(), account, () -> {
+            var keys = db.queryForList("""
+                SELECT synthetic_key FROM instruments WHERE exchange || ':' || symbol=?
+                AND synthetic_key IS NOT NULL AND listing_status='ACTIVE'
+                """, String.class, symbol);
+            return keys.isEmpty() ? List.of() : market.candles("demo", Market.instrument(keys.getFirst()));
+        });
+    }
+
+    @GetMapping("/instruments")
+    InstrumentCatalog.Page instruments(@AuthenticationPrincipal AccountDirectory.Principal user, @PathVariable UUID account,
+                                      @RequestParam(defaultValue = "") String q, @RequestParam(defaultValue = "") String exchange,
+                                      @RequestParam(defaultValue = "") String type, @RequestParam(defaultValue = "false") boolean pinned,
+                                      @RequestParam(defaultValue = "0") int offset, @RequestParam(defaultValue = "25") int limit) {
+        return orders.owned(user.userId(), account,
+            () -> catalog.search(q, exchange, type, pinned ? user.userId() : null, offset, limit));
+    }
+
+    @GetMapping("/instruments/{id}")
+    InstrumentCatalog.Listing instrument(@AuthenticationPrincipal AccountDirectory.Principal user,
+                                         @PathVariable UUID account, @PathVariable UUID id) {
+        return orders.owned(user.userId(), account, () -> catalog.detail(id));
     }
 
     @PutMapping(value = "/watchlist", consumes = "application/json")
     @ResponseStatus(HttpStatus.NO_CONTENT)
     void watch(@AuthenticationPrincipal AccountDirectory.Principal user, @PathVariable UUID account,
                @RequestBody Pin pin) {
-        orders.pin(user.userId(), account, pin.symbol(), pin.pinned());
+        if ((pin.symbol() == null) == (pin.instrumentId() == null)) {
+            throw PaperOrders.error(HttpStatus.BAD_REQUEST, "INVALID_INSTRUMENT");
+        }
+        orders.pin(user.userId(), account, pin.symbol(), pin.instrumentId(), pin.pinned());
     }
 
     @ExceptionHandler(ResponseStatusException.class)

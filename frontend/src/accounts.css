@@ -19,3 +19,7 @@
   .account-session { gap: 8px; }
 }
 .lower-grid.single-portfolio { grid-template-columns: minmax(0, 1fr); }
+.catalog-filters { display: flex; flex-wrap: wrap; gap: 6px; padding: 6px 10px; }
+.catalog-filters select { min-width: 0; flex: 1 1 90px; }
+.catalog-pages { justify-content: space-between; }
+.catalog-detail { font-size: 12px; margin-top: 4px; overflow-wrap: anywhere; }

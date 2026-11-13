@@ -118,7 +118,17 @@ function App({ demoAccount, sessionExpired }) {
   const [terminal, setTerminal] = useState(null);
   const [error, setError] = useState('');
   const [search, setSearch] = useState('');
+  const [exchangeFilter, setExchangeFilter] = useState('');
+  const [typeFilter, setTypeFilter] = useState('');
+  const [catalogOffset, setCatalogOffset] = useState(0);
+  const [discovery, setDiscovery] = useState(null);
+  const [discoveryError, setDiscoveryError] = useState('');
+  const [catalogRevision, setCatalogRevision] = useState(0);
+  const [selection, setSelection] = useState(null);
   const [pinnedOnly, setPinnedOnly] = useState(false);
+  const catalogQuery = query({ q: search, exchange: exchangeFilter, type: typeFilter,
+    pinned: pinnedOnly, offset: catalogOffset, limit: 20 }).toString();
+
   const [range, setRange] = useState(30);
   const [series, setSeries] = useState(null);
   const [side, setSide] = useState('BUY');
@@ -180,9 +190,41 @@ function App({ demoAccount, sessionExpired }) {
     return () => controller.abort();
   }, [mode, symbol, secured]);
 
+  useEffect(() => {
+    if (!secured) return;
+    const controller = new AbortController();
+    setDiscoveryError('');
+    const timer = setTimeout(async () => {
+      try {
+        const page = await secured.read('/instruments?' + catalogQuery, { signal: controller.signal });
+        if (!controller.signal.aborted) setDiscovery({ ...page, query: catalogQuery, revision: catalogRevision });
+      } catch (failure) {
+        if (!controller.signal.aborted) setDiscoveryError(failure.message);
+      }
+    }, 200);
+    return () => { clearTimeout(timer); controller.abort(); };
+  }, [secured, catalogQuery, catalogRevision]);
+
+  useEffect(() => {
+    if (!secured || !selection?.id) return;
+    const controller = new AbortController();
+    secured.read('/instruments/' + selection.id, { signal: controller.signal })
+      .then(listing => {
+        if (!controller.signal.aborted) {
+          setSelection(listing);
+          setSymbol(listing.symbol);
+        }
+      })
+      .catch(failure => { if (!controller.signal.aborted) setDiscoveryError(failure.message); });
+    return () => controller.abort();
+  }, [secured, selection?.id, catalogRevision]);
+
   const active = terminal?.feed.mode === mode ? terminal : null;
   const account = active?.account;
-  const instrument = active?.instruments.find(i => i.symbol === symbol);
+  const catalogPage = discovery?.query === catalogQuery && discovery?.revision === catalogRevision ? discovery : null;
+  const instrument = selection?.symbol === symbol ? selection : active?.instruments.find(i => i.symbol === symbol);
+  const metadataOnly = secured && (instrument?.demoTradable === false ||
+    (!!active && !active.instruments.some(i => i.symbol === symbol)));
   const quote = active?.feed.quotes[symbol];
   const candles = React.useMemo(() => series?.mode === mode && series.symbol === symbol ? series.data.slice(-range) : [],
     [series, mode, symbol, range]);
@@ -190,7 +232,7 @@ function App({ demoAccount, sessionExpired }) {
   const tradeable = active?.tradeable.includes(symbol) && (!secured || Date.now() - quote?.time <= 6000);
   const working = account?.orders.filter(o => o.status === 'OPEN') || [];
   const visibleReport = report?.mode === mode && (report.symbol == null || report.symbol === symbol) ? report.data : null;
-  const rows = active?.instruments.filter(i => (!pinnedOnly || active.watchlist.includes(i.symbol)) &&
+  const rows = secured ? catalogPage?.instruments || [] : active?.instruments.filter(i => (!pinnedOnly || active.watchlist.includes(i.symbol)) &&
     (i.symbol + ' ' + i.name).toLowerCase().includes(search.trim().toLowerCase())) || [];
   const unit = kind === 'MARKET' ? quote?.price : Math.round(Number(trigger) * 100);
   const notional = unit > 0 && Number.isInteger(Number(quantity)) && Number(quantity) > 0 ? unit * Number(quantity) : null;
@@ -243,8 +285,9 @@ function App({ demoAccount, sessionExpired }) {
 
   async function pin() {
     try {
-      if (secured) await secured.write('PUT', '/watchlist', { symbol, pinned: !watched });
+      if (secured) await secured.write('PUT', '/watchlist', { ...(instrument?.id ? { instrumentId: instrument.id } : { symbol }), pinned: !watched });
       else await api('/watchlist?' + query({ symbol, pinned: !watched }), { method: 'PUT' });
+      if (secured) setCatalogRevision(n => n + 1);
       await refresh();
     } catch (e) { setError(e.message); }
   }
@@ -293,34 +336,54 @@ function App({ demoAccount, sessionExpired }) {
       <div className="terminal-grid">
         <section className="panel markets" aria-label="Market watch">
           <div className="panel-title"><Layers3 size={16}/> <h2>Market watch</h2></div>
-          <label className="search"><Search size={16}/><input aria-label="Search symbols" placeholder="Find a symbol" value={search} onChange={e => setSearch(e.target.value)}/></label>
-          <div className="tabs watch-tabs"><button className={!pinnedOnly ? 'selected' : ''} onClick={() => setPinnedOnly(false)}>All stocks</button>
-            <button className={pinnedOnly ? 'selected' : ''} onClick={() => setPinnedOnly(true)}>Watchlist</button></div>
+          <label className="search"><Search size={16}/><input aria-label="Search symbols" placeholder={secured ? "Symbol, company or ISIN" : "Find a symbol"} maxLength={100} value={search} onChange={e => { setSearch(e.target.value); setCatalogOffset(0); }} onKeyDown={e => {
+            if (secured && e.key === "Enter" && rows.length) { e.preventDefault(); setSelection(rows[0]); setSymbol(rows[0].symbol); }
+          }}/></label>
+          {secured && <div className="catalog-filters">
+            <select aria-label="Exchange filter" value={exchangeFilter} onChange={e => { setExchangeFilter(e.target.value); setCatalogOffset(0); }}>
+              <option value="">All exchanges</option><option>NSE</option><option>BSE</option>
+            </select>
+            <select aria-label="Instrument type filter" value={typeFilter} onChange={e => { setTypeFilter(e.target.value); setCatalogOffset(0); }}>
+              <option value="">All equities</option><option value="EQUITY">Equity</option><option value="SME_EQUITY">SME equity</option>
+            </select>
+          </div>}
+          <div className="tabs watch-tabs"><button className={!pinnedOnly ? 'selected' : ''} onClick={() => { setPinnedOnly(false); setCatalogOffset(0); }}>All stocks</button>
+            <button className={pinnedOnly ? 'selected' : ''} onClick={() => { setPinnedOnly(true); setCatalogOffset(0); }}>Watchlist</button></div>
           <div className="market-columns muted"><span>Symbol</span><span>Last / Change</span></div>
           <div className="market-rows">{rows.map(i => {
-            const q = active.feed.quotes[i.symbol];
+            const q = active?.feed.quotes[i.symbol];
             const pct = q && q.price !== q.change ? q.change / (q.price - q.change) * 100 : null;
-            return <button key={i.symbol} className={'stock ' + (symbol === i.symbol ? 'active-stock' : '')} aria-pressed={symbol === i.symbol}
-              onClick={() => { setSymbol(i.symbol); setOrderMessage(''); }}>
-              <span><strong>{ticker(i.symbol)}</strong><small>{exchange(i.symbol)} · {i.name}</small></span>
+            return <button key={i.id || i.symbol} className={'stock ' + (symbol === i.symbol ? 'active-stock' : '')} aria-pressed={symbol === i.symbol}
+              onClick={() => { setSelection(secured ? i : null); setSymbol(i.symbol); setOrderMessage(''); }}>
+              <span><strong>{ticker(i.symbol)}</strong><small>{exchange(i.symbol)} · {i.name}</small>{secured && <small>{i.demoTradable ? "Synthetic" : i.status === "ACTIVE" ? "Metadata only" : i.status.toLowerCase()}</small>}</span>
               <span className="mono">{price(q?.price)}<small className={tone(pct)}>{pct == null ? '—' : (pct > 0 ? '+' : '') + pct.toFixed(2) + '%'}</small></span>
             </button>;
           })}
-          {!rows.length && <p className="empty">{active ? 'No matching symbols.' : 'Loading symbols…'}</p>}</div>
+          {discoveryError && <p className="empty" role="alert">{discoveryError}</p>}
+          {!rows.length && !discoveryError && <p className="empty" role="status">{(secured ? catalogPage : active) ? 'No matching instruments.' : 'Loading instruments…'}</p>}</div>
+          {secured && <div className="catalog-filters catalog-pages">
+            <button className="quiet" disabled={catalogOffset === 0} onClick={() => setCatalogOffset(n => Math.max(0, n - 20))}>Previous</button>
+            <button className="quiet" disabled={catalogPage?.nextOffset == null} onClick={() => setCatalogOffset(catalogPage.nextOffset)}>Next</button>
+          </div>}
         </section>
 
         <section className="panel chart" aria-label="Price chart">
           <div className="chart-title"><div><div className="instrument"><h2>{ticker(symbol)}</h2><span>{exchange(symbol)}</span></div>
-            <div className="muted">{instrument?.name || 'Equity'}</div></div>
-            <button className="icon-button" aria-label={watched ? 'Remove from watchlist' : 'Add to watchlist'} aria-pressed={!!watched} onClick={pin} disabled={!active}><Star size={17} fill={watched ? 'currentColor' : 'none'}/></button>
+            <div className="muted">{instrument?.name || 'Equity'}</div>
+            {secured && selection?.symbol === symbol && <div className="muted catalog-detail">
+              {selection.fictional ? 'Fictional listing' : 'Tape listing'} · {selection.status}
+              {selection.isin && <> · {selection.fictional ? 'Sample ISIN' : 'ISIN'} {selection.isin}</>}
+              {selection.tickSizePaise != null && <> · Tick {money(selection.tickSizePaise)}</>}
+            </div>}</div>
+            <button className="icon-button" aria-label={watched ? 'Remove from watchlist' : 'Add to watchlist'} aria-pressed={!!watched} onClick={pin} disabled={!active || (secured && !watched && instrument?.status && instrument.status !== "ACTIVE")}><Star size={17} fill={watched ? 'currentColor' : 'none'}/></button>
           </div>
           <div className="quote"><strong className="mono">{money(quote?.price)}</strong>
             {quote && <span className={'mono ' + tone(quote.change)}>{quote.change > 0 ? '+' : quote.change < 0 ? '−' : ''}{money(Math.abs(quote.change))} <span className="muted">vs prev. close</span></span>}</div>
           <div className="chart-tools"><span><ChartCandlestick size={15}/> Daily candles</span><div className="tabs">
             {[['30D',30], ['60D',60], ['90D',90]].map(([label,n]) => <button key={n} title={n + " trading sessions"} className={range === n ? 'selected' : ''} aria-pressed={range === n} onClick={() => setRange(n)}>{label}</button>)}
           </div></div>
-          <Chart candles={candles} symbol={symbol}/>
-          <div className="chart-footer"><span><i/> Volume</span><span>{mode === 'demo' ? 'Synthetic prices' : tradeable ? 'Upstox' : 'Upstox · Last available'} · INR</span></div>
+          {metadataOnly ? <div className="empty-chart">Price data unavailable for this listing.</div> : <Chart candles={candles} symbol={symbol}/>}
+          <div className="chart-footer"><span><i/> Volume</span><span>{metadataOnly ? 'Metadata only · Historical prices unavailable' : mode === 'demo' ? 'Synthetic candles' : tradeable ? 'Upstox' : 'Upstox · Last available'} · INR</span></div>
         </section>
 
         <section className="panel ticket" aria-label="Order ticket">
@@ -334,8 +397,8 @@ function App({ demoAccount, sessionExpired }) {
             <dl className="est"><div><dt>Order value</dt><dd>{money(notional)}</dd></div><div><dt>Estimated fee</dt><dd>{money(estFee)}</dd></div><div><dt>Buying power</dt><dd>{money(account?.available)}</dd></div>
               {secured && <><div><dt>Cash balance</dt><dd>{money(account?.cash)}</dd></div><div><dt>Reserved cash</dt><dd>{money(account?.reserved)}</dd></div></>}
               {secured && side === 'SELL' && <div><dt>Available shares</dt><dd>{account?.holdings.find(h => h.symbol === symbol)?.availableQuantity ?? 0}</dd></div>}</dl>
-            <button className="primary" disabled={busy || pending || !active || (mode === "live" && !active.liveConfigured) || (kind === 'MARKET' && (!tradeable || !!error))}>{busy ? 'Submitting…' : 'Place paper ' + side.toLowerCase()}</button>
-            <p className="ticket-note">{kind === 'MARKET' && !tradeable ? 'Waiting for a tradeable quote.' : 'Fills use virtual funds and simulated fees.'}</p>
+            <button className="primary" disabled={busy || pending || metadataOnly || !active || (mode === "live" && !active.liveConfigured) || (kind === 'MARKET' && (!tradeable || !!error))}>{busy ? 'Submitting…' : 'Place paper ' + side.toLowerCase()}</button>
+            <p className="ticket-note">{metadataOnly ? 'Demo trading unavailable for this listing.' : kind === 'MARKET' && !tradeable ? 'Waiting for a tradeable quote.' : 'Fills use virtual funds and simulated fees.'}</p>
             {pending && <div className="feedback">
               <p>Confirm the previous submission before placing another order.</p>
               <button type="button" className="quiet" disabled={busy} onClick={() => reconcile()}>Resolve pending order</button>

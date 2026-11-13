@@ -13,7 +13,7 @@ import org.springframework.security.web.SecurityFilterChain;
 import java.net.InetAddress;
 
 @Configuration(proxyBeanMethods = false)
-@Profile("!accounts")
+@Profile("!accounts & !catalog-import")
 @EnableScheduling
 class LegacyMode {
     @Bean

@@ -70,7 +70,8 @@ class AccountSecurity {
                 .requestMatchers(HttpMethod.GET, "/api/v1/auth/me", "/api/v1/accounts", "/api/v1/accounts/*").authenticated()
                 .requestMatchers(HttpMethod.GET, "/api/v1/accounts/*/orders", "/api/v1/accounts/*/orders/*",
                     "/api/v1/accounts/*/order-requests/*", "/api/v1/accounts/*/wallet", "/api/v1/accounts/*/portfolio",
-                    "/api/v1/accounts/*/market", "/api/v1/accounts/*/candles").authenticated()
+                    "/api/v1/accounts/*/market", "/api/v1/accounts/*/candles",
+                    "/api/v1/accounts/*/instruments", "/api/v1/accounts/*/instruments/*").authenticated()
                 .requestMatchers(HttpMethod.POST, "/api/v1/accounts/*/orders").authenticated()
                 .requestMatchers(HttpMethod.DELETE, "/api/v1/accounts/*/orders/*").authenticated()
                 .requestMatchers(HttpMethod.PUT, "/api/v1/accounts/*/watchlist").authenticated()

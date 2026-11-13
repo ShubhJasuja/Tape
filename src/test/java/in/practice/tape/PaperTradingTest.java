@@ -413,6 +413,113 @@ class PaperTradingTest {
         }
     }
 
+    @Test
+    void catalogSearchPagesFiltersAndKeepsMetadataOnlyWatchlistsPrivate() throws Exception {
+        var alice = client();
+        var bob = client();
+        String search = alice.base() + "/instruments";
+        var page = JSON.readTree(alice.browser.get(search + "?exchange=NSE&type=EQUITY&limit=3").body());
+        assertEquals(3, page.path("instruments").size());
+        assertEquals(3, page.path("nextOffset").asInt());
+        var next = JSON.readTree(alice.browser.get(search + "?exchange=NSE&type=EQUITY&limit=3&offset=3").body());
+        assertNotEquals(page.path("instruments").get(0).path("id"), next.path("instruments").get(0).path("id"));
+        var item = JSON.readTree(alice.browser.get(search + "?q=zz0000000002").body()).path("instruments").get(0);
+        assertEquals("NSE:FICT002", item.path("symbol").asText());
+        assertEquals("UNAVAILABLE", item.path("priceAvailability").asText());
+        assertTrue(item.path("fictional").asBoolean());
+        assertEquals(200, alice.browser.get(search + "/" + item.path("id").asText()).statusCode());
+        assertEquals(404, bob.browser.get(search).statusCode());
+        assertTrue(JSON.readTree(alice.browser.get(search + "?q=Riverstone").body()).path("instruments").size() > 0);
+        assertTrue(JSON.readTree(alice.browser.get(search + "?q=%25").body()).path("instruments").isEmpty());
+        assertEquals(204, alice.browser.write("PUT", alice.base() + "/watchlist",
+            "{\"instrumentId\":\"" + item.path("id").asText() + "\",\"pinned\":true}", "application/json", true).statusCode());
+        assertEquals(1, JSON.readTree(alice.browser.get(search + "?q=FICT002&pinned=true").body()).path("instruments").size());
+        assertTrue(JSON.readTree(bob.browser.get(bob.base() + "/instruments?q=FICT002&pinned=true").body())
+            .path("instruments").isEmpty());
+        for (String kind : List.of("MARKET","LIMIT","STOP")) {
+            String payload = JSON.writeValueAsString(new PaperOrders.Ticket(UUID.randomUUID(), "NSE:FICT002",
+                "BUY", kind, 1, "MARKET".equals(kind) ? null : BigDecimal.ONE));
+            var rejected = alice.browser.write("POST", alice.base() + "/orders", payload, "application/json", true);
+            assertEquals(409, rejected.statusCode());
+            assertEquals("INSTRUMENT_NOT_TRADABLE", JSON.readTree(rejected.body()).path("code").asText());
+        }
+        assertTrue(JSON.readTree(alice.browser.get(alice.base() + "/candles?symbol=NSE%3AFICT002").body()).isEmpty());
+    }
+
+    @Test
+    void fixtureImportIsAtomicPreservesIdentityAndCannotEnableExecution() throws Exception {
+        var a = account();
+        var filledTicket = ticket("BUY", "MARKET", 1, null);
+        var existing = submit(first, a, filledTicket);
+        var open = submit(first, a, ticket("BUY", "LIMIT", 1, "1.00"));
+        var password = UUID.randomUUID().toString();
+        admin.execute("CREATE ROLE tape_catalog_writer LOGIN PASSWORD '" + password + "'");
+        new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(
+            new org.springframework.core.io.FileSystemResource("docs/catalog-runtime-grants.sql")).execute(admin.getDataSource());
+        var url = ((DriverManagerDataSource) admin.getDataSource()).getUrl();
+        var writerDataSource = new DriverManagerDataSource(url, "tape_catalog_writer", password);
+        var writer = new JdbcTemplate(writerDataSource);
+        var sync = new CatalogSync(writer, new TransactionTemplate(new JdbcTransactionManager(writerDataSource)));
+        assertEquals(0, writer.update("UPDATE instruments SET listing_status='INACTIVE' WHERE source='TAPE_BUILTIN'"));
+        assertThrows(DataAccessException.class, () -> writer.update("UPDATE instruments SET synthetic_key=NULL"));
+        String key = "test-" + UUID.randomUUID();
+        Instant time = Instant.now().minusSeconds(10).truncatedTo(java.time.temporal.ChronoUnit.MILLIS);
+        var entry = new CatalogFeed.Entry(key, "NSE", "FICTTESTNEW", "New Test Co (fictional)", "ZZ9876543210", "EQUITY", "ACTIVE", null);
+        var snapshot = new CatalogFeed.Snapshot("TAPE_FIXTURE", time, false, List.of(entry));
+        assertTrue(sync.synchronize(() -> snapshot).applied());
+        assertFalse(sync.synchronize(() -> snapshot).applied());
+        UUID id = admin.queryForObject("SELECT id FROM instruments WHERE source_key=?", UUID.class, key);
+        first.pin(a.owner, a.account, "NSE:FICTTESTNEW", true);
+        var renamed = new CatalogFeed.Entry(key, "NSE", "FICTTESTOLD", "Renamed Test Co (fictional)", "ZZ9876543210",
+            "EQUITY", "DELISTED", null);
+        assertThrows(IllegalArgumentException.class, () -> sync.synchronize(() ->
+            new CatalogFeed.Snapshot("TAPE_FIXTURE", time.plusSeconds(1), false, List.of(renamed, renamed))));
+        var newSnapshot = new CatalogFeed.Snapshot("TAPE_FIXTURE", time.plusSeconds(1), false, List.of(renamed));
+        assertTrue(sync.synchronize(() -> newSnapshot).applied());
+        assertFalse(sync.synchronize(() -> snapshot).applied());
+        var catalog = new InstrumentCatalog(admin);
+        assertEquals(id, catalog.detail(id).id());
+        assertEquals("FICTTESTOLD", catalog.detail(id).tradingSymbol());
+        assertEquals("DELISTED", catalog.detail(id).status());
+        assertFalse(catalog.detail(id).demoTradable());
+        assertEquals(id, catalog.search("FICTTESTOLD", "", "", a.owner, 0, 20).instruments().getFirst().id());
+        assertEquals("OPEN", first.detail(a.owner, a.account, open.id()).status());
+        assertEquals(existing.instrumentId(), first.detail(a.owner, a.account, existing.id()).instrumentId());
+        assertEquals(1, first.portfolio(a.owner, a.account).positions().getFirst().quantity());
+        assertHealthy(a);
+
+        var omitted = new CatalogFeed.Entry("omitted-test", "BSE", "FICTOMIT", "Omitted Co (fictional)", null,
+            "EQUITY", "ACTIVE", null);
+        var collision = new CatalogFeed.Entry("collision-test", "NSE", "FICTTESTOLD", "Collision Co (fictional)", null,
+            "EQUITY", "ACTIVE", null);
+        assertThrows(DataAccessException.class, () -> sync.synchronize(() -> new CatalogFeed.Snapshot("TAPE_FIXTURE",
+            time.plusSeconds(2), false, List.of(omitted, collision))));
+        assertEquals(0, admin.queryForObject("SELECT count(*) FROM instruments WHERE source_key='omitted-test'", Integer.class));
+        assertTrue(sync.synchronize(() -> new CatalogFeed.Snapshot("TAPE_FIXTURE", time.plusSeconds(2), false,
+            List.of(omitted))).applied());
+        var complete = admin.query("""
+            SELECT source_key,exchange,symbol,name,isin,instrument_type,listing_status,tick_size_paise
+            FROM instruments WHERE source='TAPE_FIXTURE' AND source_key<>'omitted-test'
+            """, (rs, row) -> new CatalogFeed.Entry(rs.getString(1), rs.getString(2), rs.getString(3), rs.getString(4),
+            rs.getString(5), rs.getString(6), rs.getString(7), rs.getObject(8, Long.class)));
+        assertEquals(1, sync.synchronize(() -> new CatalogFeed.Snapshot("TAPE_FIXTURE", time.plusSeconds(3), true,
+            complete)).inactivated());
+        assertEquals("INACTIVE", admin.queryForObject("SELECT listing_status FROM instruments WHERE source_key='omitted-test'", String.class));
+
+        var original = first.detail(a.owner, a.account, existing.id());
+        admin.update("UPDATE instruments SET symbol='RELIANCE-TEST',listing_status='INACTIVE' WHERE id=?", original.instrumentId());
+        try {
+            assertEquals(existing.id(), submit(first, a, filledTicket).id());
+            match(a, open);
+            assertEquals("OPEN", first.detail(a.owner, a.account, open.id()).status());
+            assertEquals(1, first.portfolio(a.owner, a.account).positions().getFirst().quantity());
+            first.cancel(a.owner, a.account, open.id());
+            assertHealthy(a);
+        } finally {
+            admin.update("UPDATE instruments SET symbol='RELIANCE',listing_status='ACTIVE' WHERE id=?", original.instrumentId());
+        }
+    }
+
     private static Client client() throws Exception {
         var browser = new AccountSecurityTest.Browser(app);
         String email = UUID.randomUUID() + "@example.test";

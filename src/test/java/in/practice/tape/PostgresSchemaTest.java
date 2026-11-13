@@ -4,6 +4,7 @@ import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
+import org.flywaydb.core.Flyway;
 import org.springframework.boot.WebApplicationType;
 import org.springframework.boot.builder.SpringApplicationBuilder;
 import org.springframework.context.ConfigurableApplicationContext;
@@ -29,6 +30,10 @@ class PostgresSchemaTest {
     private static final PostgreSQLContainer<?> POSTGRES = new PostgreSQLContainer<>("postgres:17");
     private static JdbcTemplate pg;
     private static TimeZone originalTimeZone;
+    private static final UUID EXISTING_INSTRUMENT = UUID.fromString("43446c65-7245-4400-a100-000000000001");
+    private static UUID existingAccount;
+    private static UUID existingOrder;
+    private static UUID existingWatchlist;
 
     @BeforeAll
     static void initializeEmptyDatabase() {
@@ -38,6 +43,15 @@ class PostgresSchemaTest {
         pg = new JdbcTemplate(new DriverManagerDataSource(
             POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword()));
         assertNull(pg.queryForObject("SELECT to_regclass('public.trading_accounts')::text", String.class));
+        Flyway.configure().dataSource(pg.getDataSource()).locations("classpath:db/migration/postgresql").target("4").load().migrate();
+        var existingOwner = user();
+        existingAccount = account(existingOwner, "DEMO");
+        existingOrder = order(existingAccount, EXISTING_INSTRUMENT, UUID.randomUUID());
+        pg.update("INSERT INTO positions (account_id,instrument_id,quantity,cost_paise) VALUES (?,?,4,40000)",
+            existingAccount, EXISTING_INSTRUMENT);
+        existingWatchlist = UUID.randomUUID();
+        pg.update("INSERT INTO watchlists (id,user_id,name) VALUES (?,?,'Default')", existingWatchlist, existingOwner);
+        pg.update("INSERT INTO watchlist_items (watchlist_id,instrument_id) VALUES (?,?)", existingWatchlist, EXISTING_INSTRUMENT);
         try (var application = startApplication()) {
             assertIsolatedDataSources(application);
         }
@@ -50,13 +64,19 @@ class PostgresSchemaTest {
     }
 
     @Test
-    void appliesBothMigrationsAndPreservesPostgresRowsAcrossApplicationRestart() {
+    void upgradesV4AndPreservesReferencesAcrossApplicationRestart() {
         var owner = user();
         try (var application = startApplication()) {
             assertIsolatedDataSources(application);
-            assertEquals(List.of("1", "2", "3", "4"), pg.queryForList(
+            assertEquals(List.of("1", "2", "3", "4", "5"), pg.queryForList(
                 "SELECT version FROM flyway_schema_history WHERE success ORDER BY installed_rank", String.class));
             assertEquals(1L, count("SELECT count(*) FROM users WHERE id = ?", owner));
+            assertEquals("NSE:RELIANCE", pg.queryForObject("SELECT requested_symbol FROM orders WHERE id=? AND instrument_id=?",
+                String.class, existingOrder, EXISTING_INSTRUMENT));
+            assertEquals(1L, count("SELECT count(*) FROM watchlist_items WHERE watchlist_id=? AND instrument_id=?",
+                existingWatchlist, EXISTING_INSTRUMENT));
+            assertEquals(4L, count("SELECT quantity FROM positions WHERE account_id=? AND instrument_id=?",
+                existingAccount, EXISTING_INSTRUMENT));
         }
     }
 
