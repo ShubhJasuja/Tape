@@ -30,13 +30,13 @@ import static org.junit.jupiter.api.Assertions.*;
 
 @EnabledIfSystemProperty(named = "tape.postgres.tests", matches = "true")
 class AccountSecurityTest {
-    private static final String PASSWORD = UUID.randomUUID().toString();
+    static final String PASSWORD = UUID.randomUUID().toString();
     private static final String API = "/api/v1";
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final PostgreSQLContainer<?> POSTGRES = new PostgreSQLContainer<>("postgres:17")
         .withDatabaseName("tape").withPassword(UUID.randomUUID().toString());
     private static ConfigurableApplicationContext local;
-    private static JdbcTemplate owner;
+    static JdbcTemplate owner;
     private static String runtimePassword;
     private static TimeZone originalZone;
 
@@ -246,11 +246,25 @@ class AccountSecurityTest {
     }
 
     private static ConfigurableApplicationContext startApplication(boolean localMode) {
+        return startApplication(localMode, false);
+    }
+
+    static DriverManagerDataSource runtimeDataSource() {
+        return new DriverManagerDataSource(POSTGRES.getJdbcUrl(), "tape_runtime", runtimePassword);
+    }
+
+    static ConfigurableApplicationContext startApplication(boolean localMode, boolean trading) {
+        return startApplication(localMode, trading, false);
+    }
+
+    static ConfigurableApplicationContext startApplication(boolean localMode, boolean trading, boolean matcher) {
         var profiles = localMode ? new String[]{"accounts", "accounts-local"} : new String[]{"accounts"};
         var settings = new java.util.HashMap<String, Object>(Map.of(
             "TAPE_ACCOUNTS_URL", POSTGRES.getJdbcUrl(), "TAPE_ACCOUNTS_PASSWORD", runtimePassword,
             "TAPE_ACCOUNTS_USER", "tape_runtime", "TAPE_ACCOUNTS_MIGRATE", "false", "server.port", 0,
             "UPSTOX_ANALYTICS_TOKEN", "", "OLLAMA_MODEL", ""));
+        settings.put("TAPE_SYNTHETIC_TRADING_ENABLED", trading);
+        settings.put("TAPE_SYNTHETIC_MATCHER_ENABLED", matcher);
         if (!localMode) {
             settings.put("server.forward-headers-strategy", "native");
             settings.put("server.tomcat.remoteip.internal-proxies", "127\\.0\\.0\\.1");
@@ -270,7 +284,7 @@ class AccountSecurityTest {
         return browser;
     }
 
-    private static final class Browser {
+    static final class Browser {
         private final URI base;
         private final CookieManager cookies = new CookieManager(null, CookiePolicy.ACCEPT_ALL);
         private final HttpClient http = HttpClient.newBuilder().cookieHandler(cookies)

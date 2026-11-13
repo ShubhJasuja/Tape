@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { Activity } from 'lucide-react';
 import './accounts.css';
 
@@ -22,6 +22,8 @@ export default function TapeEntry({ Terminal }) {
   const [phase, setPhase] = useState('loading');
   const [user, setUser] = useState(null);
   const [error, setError] = useState('');
+
+  const signOut = useCallback(() => setUser(null), []);
 
   async function restore() {
     setError('');
@@ -48,10 +50,10 @@ export default function TapeEntry({ Terminal }) {
   if (phase === 'loading') return <main className="account-page"><p role="status">Connecting to Tape…</p></main>;
   if (phase === 'error') return <main className="account-page"><p role="alert">{error}</p>
     <button className="quiet" onClick={restore}>Try again</button></main>;
-  return <AccountWorkspace user={user} restore={restore} signOut={() => setUser(null)} />;
+  return <AccountWorkspace user={user} restore={restore} signOut={signOut} Terminal={Terminal} />;
 }
 
-function AccountWorkspace({ user, restore, signOut }) {
+function AccountWorkspace({ user, restore, signOut, Terminal }) {
   const [registering, setRegistering] = useState(false);
   const [email, setEmail] = useState('');
   const [busy, setBusy] = useState(false);
@@ -146,7 +148,7 @@ function AccountWorkspace({ user, restore, signOut }) {
         {error && <p className="notice" role="alert">{error}</p>}
         {message && <p className="notice" role="status">{message}</p>}
         {user ? <>
-          <p>Trading is unavailable in this workspace. Your account balances are virtual.</p>
+          <p>Account balances are virtual. Live-data trading is unavailable.</p>
           {!accounts && !error && <p role="status">Loading your accounts…</p>}
           {accounts?.length === 0 && <p>No accounts are available.</p>}
           {active && <>
@@ -157,11 +159,11 @@ function AccountWorkspace({ user, restore, signOut }) {
                 </option>)}
               </select>
             </label>
-            <dl className="account-balances">
+            {!active.tradingEnabled && <dl className="account-balances">
               <div><dt>Virtual balance</dt><dd>{amount.format(active.balancePaise / 100)}</dd></div>
               <div><dt>Reserved cash</dt><dd>{amount.format(active.reservedPaise / 100)}</dd></div>
-            </dl>
-            <p className="account-note">{active.mode === 'LIVE_DATA' ? 'Live-data trading requires market-data permissions.' : 'Demo trading will be enabled after account-scoped execution is ready.'}</p>
+            </dl>}
+            <p className="account-note">{active.mode === 'LIVE_DATA' ? 'Live-data trading requires market-data permissions.' : active.tradingEnabled ? 'Demo trades use synthetic quotes and virtual cash.' : 'Demo trading is disabled on this server.'}</p>
           </>}
         </> : <>
           <form className="account-form" onSubmit={submit}>
@@ -178,5 +180,6 @@ function AccountWorkspace({ user, restore, signOut }) {
         </>}
       </section>
     </main>
+    {active?.tradingEnabled && <Terminal key={active.id} demoAccount={active.id} sessionExpired={signOut} />}
   </>;
 }

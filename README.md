@@ -18,7 +18,7 @@ Use `./mvnw` instead of `./mvnw.cmd` on Linux or macOS. Open [the terminal](http
 
 ## Authenticated paper accounts
 
-The optional PostgreSQL workspace supports registration, sign-in, sign-out, and separate funded virtual accounts per user. Trading is unavailable in that workspace. The default loopback H2 terminal retains the existing simulator, charts, research and order flows. See the [authentication guide](docs/authentication.md) for profile setup and API contracts.
+The optional PostgreSQL workspace supports registration, sign-in, sign-out, and separate funded virtual accounts per user. Enable account-scoped synthetic Demo trading with the [trading setup](docs/trading.md#enable-a-local-demo-workspace). Live-data execution remains disabled. The default loopback H2 terminal retains the existing simulator, charts, research and order flows. See the [authentication guide](docs/authentication.md) for profile setup and API contracts.
 
 ## Live NSE and BSE data
 
@@ -50,7 +50,7 @@ flowchart LR
     Research --> LocalAI[Optional Ollama focus selection]
 ```
 
-Run `./mvnw.cmd clean verify` on Windows or `./mvnw --batch-mode clean verify` on Linux or macOS. The GitHub Actions workflow builds the locked frontend with `npm ci` and verifies the backend. The default suite uses in-memory H2. CI also runs the opt-in PostgreSQL schema suite. Both suites disable Upstox and Ollama. The characterization suite uses controlled quotes and runs matching explicitly. The legacy terminal binds to loopback and uses one shared local workspace. The PostgreSQL account workspace provides authentication and isolated balances. Public trading still requires account-scoped execution and verification of market-data rights. The checked-in code makes no broker order calls.
+Run `./mvnw.cmd clean verify` on Windows or `./mvnw --batch-mode clean verify` on Linux or macOS. The GitHub Actions workflow builds the locked frontend with `npm ci` and verifies the backend. The default suite uses in-memory H2. CI also runs the opt-in PostgreSQL schema suite. Both suites disable Upstox and Ollama. The characterization suite uses controlled quotes and runs matching explicitly. The legacy terminal binds to loopback and uses one shared local workspace. The PostgreSQL account workspace provides authentication and isolated balances. Shared deployment still requires operational hardening and verification of market-data rights. The checked-in code makes no broker order calls.
 
 ## Back up the local H2 database
 

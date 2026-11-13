@@ -8,6 +8,7 @@ import '@fontsource/dm-sans/700.css';
 import '@fontsource/ibm-plex-mono/400.css';
 import './style.css';
 import TapeEntry from './accounts.jsx';
+import { demoApi, orderMessage as describeOrder, pendingKey, settleOrder, terminalOrder } from './demoApi.js';
 
 const inr = new Intl.NumberFormat('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const price = n => n == null ? '—' : inr.format(n / 100);
@@ -107,7 +108,11 @@ function Chart({ candles, symbol }) {
   </>;
 }
 
-function App() {
+function App({ demoAccount, sessionExpired }) {
+  const secured = React.useMemo(() => demoAccount && demoApi(demoAccount, sessionExpired), [demoAccount, sessionExpired]);
+  const [offset, setOffset] = useState(0);
+  const [pending, setPending] = useState(() => demoAccount && !!localStorage.getItem(pendingKey(demoAccount)));
+  const latestRefresh = useRef(0);
   const [mode, setMode] = useState('demo');
   const [symbol, setSymbol] = useState('NSE:RELIANCE');
   const [terminal, setTerminal] = useState(null);
@@ -129,26 +134,51 @@ function App() {
   const retry = useRef(null);
 
   const refresh = useCallback(async signal => {
+    const sequence = ++latestRefresh.current;
     try {
-      const data = await api('/terminal?' + query({ mode }), { signal });
+      let data;
+      if (secured) {
+        const [market, portfolio, page] = await Promise.all([
+          secured.read('/market', { signal }),
+          secured.read('/portfolio', { signal }),
+          secured.read('/orders?' + query({ offset, limit: 25 }), { signal }),
+        ]);
+        const { wallet, positions } = portfolio;
+        data = { ...market, feed: { mode, status: 'Synthetic demo', quotes: market.quotes },
+          tradeable: Object.keys(market.quotes), nextOffset: page.nextOffset,
+          account: { cash: wallet.balancePaise, reserved: wallet.reservedPaise, available: wallet.availablePaise,
+            realized: portfolio.realizedPaise, unrealized: portfolio.unrealizedPaise, equity: portfolio.equityPaise,
+            orders: page.orders.map(terminalOrder), holdings: positions.map(p => ({
+              ...p, cost: p.costPaise, value: p.valuePaise, pnl: p.unrealizedPaise,
+            })) } };
+      } else data = await api('/terminal?' + query({ mode }), { signal });
+      if (sequence !== latestRefresh.current) return;
       if (!signal?.aborted) { setTerminal(data); setError(''); }
     } catch (e) {
-      if (e.name !== 'AbortError') setError(e.message);
+      if (!signal?.aborted && sequence === latestRefresh.current && e.name !== 'AbortError') setError(e.message);
     }
-  }, [mode]);
+  }, [mode, secured, offset]);
   useEffect(() => {
     const controller = new AbortController();
     refresh(controller.signal);
-    const timer = setInterval(() => refresh(controller.signal), 3000);
-    return () => { clearInterval(timer); controller.abort(); };
+    let timer;
+    async function poll() {
+      if (controller.signal.aborted) return;
+      await refresh(controller.signal);
+      if (!controller.signal.aborted) timer = setTimeout(poll, 3000);
+    }
+    timer = setTimeout(poll, 3000);
+    return () => { clearTimeout(timer); controller.abort(); };
   }, [refresh]);
   useEffect(() => {
     const controller = new AbortController();
-    api('/candles?' + query({ mode, symbol }), { signal: controller.signal })
+    const request = secured ? secured.read('/candles?' + query({ symbol }), { signal: controller.signal })
+      : api('/candles?' + query({ mode, symbol }), { signal: controller.signal });
+    request
       .then(data => setSeries({ mode, symbol, data }))
       .catch(e => { if (e.name !== 'AbortError') setSeries({ mode, symbol, data: [] }); });
     return () => controller.abort();
-  }, [mode, symbol]);
+  }, [mode, symbol, secured]);
 
   const active = terminal?.feed.mode === mode ? terminal : null;
   const account = active?.account;
@@ -157,7 +187,7 @@ function App() {
   const candles = React.useMemo(() => series?.mode === mode && series.symbol === symbol ? series.data.slice(-range) : [],
     [series, mode, symbol, range]);
   const watched = active?.watchlist.includes(symbol);
-  const tradeable = active?.tradeable.includes(symbol);
+  const tradeable = active?.tradeable.includes(symbol) && (!secured || Date.now() - quote?.time <= 6000);
   const working = account?.orders.filter(o => o.status === 'OPEN') || [];
   const visibleReport = report?.mode === mode && (report.symbol == null || report.symbol === symbol) ? report.data : null;
   const rows = active?.instruments.filter(i => (!pinnedOnly || active.watchlist.includes(i.symbol)) &&
@@ -166,9 +196,25 @@ function App() {
   const notional = unit > 0 && Number.isInteger(Number(quantity)) && Number(quantity) > 0 ? unit * Number(quantity) : null;
   const estFee = notional == null ? null : Math.ceil(notional / 2000);
 
+  async function reconcile(ticket) {
+    setBusy(true);
+    setOrderMessage('');
+    try {
+      const order = await settleOrder(secured, demoAccount, ticket);
+      setOrderMessage(order ? describeOrder(order, money) : 'No pending submission in this browser.');
+      setAccountTab('Orders');
+      if (offset === 0) await refresh(); else setOffset(0);
+    } catch (failure) { setOrderMessage(failure.message || 'Could not verify the order.'); }
+    finally {
+      setPending(!!localStorage.getItem(pendingKey(demoAccount)));
+      setBusy(false);
+    }
+  }
+
   async function submit(e) {
     e.preventDefault();
     const ticket = { symbol, side, kind, quantity: Number(quantity), trigger: kind === 'MARKET' ? null : Number(trigger) };
+    if (secured) return reconcile(ticket);
     const fingerprint = JSON.stringify({ mode, ticket });
     if (retry.current?.fingerprint !== fingerprint) retry.current = { fingerprint, id: crypto.randomUUID() };
     setBusy(true);
@@ -187,7 +233,8 @@ function App() {
   async function cancel(id) {
     setBusy(true);
     try {
-      await api('/orders/' + id + '?' + query({ mode }), { method: 'DELETE' });
+      if (secured) await secured.write('DELETE', '/orders/' + id);
+      else await api('/orders/' + id + '?' + query({ mode }), { method: 'DELETE' });
       setOrderMessage('Order cancelled.');
       await refresh();
     } catch (e) { setOrderMessage(e.message); }
@@ -196,7 +243,8 @@ function App() {
 
   async function pin() {
     try {
-      await api('/watchlist?' + query({ symbol, pinned: !watched }), { method: 'PUT' });
+      if (secured) await secured.write('PUT', '/watchlist', { symbol, pinned: !watched });
+      else await api('/watchlist?' + query({ symbol, pinned: !watched }), { method: 'PUT' });
       await refresh();
     } catch (e) { setError(e.message); }
   }
@@ -227,14 +275,14 @@ function App() {
   }
 
   return <>
-    <header className="top">
+    {!secured && <header className="top">
       <a className="brand" href="#terminal"><span className="brand-mark"><Activity size={23}/></span> Tape <span className="brand-sub">PAPER TRADING</span></a>
       <nav aria-label="Workspace"><a href="#terminal">Terminal</a><a href="#portfolio">Portfolio</a><a href="#research">Research</a></nav>
       <div className="mode" aria-label="Market data mode">
         {['demo','live'].map(m => <button key={m} aria-pressed={mode === m} className={mode === m ? 'selected' : ''}
           disabled={busy} onClick={() => { setMode(m); setOrderMessage(''); setAnalysisError(''); }}>{m === 'demo' ? 'Demo' : 'Live data'}</button>)}
       </div>
-    </header>
+    </header>}
     <main id="terminal">
       <div className="heading">
         <div><h1>Trading terminal</h1><p>NSE &amp; BSE equities <span className="separator">/</span> Virtual account</p></div>
@@ -283,30 +331,40 @@ function App() {
             <label>Order type<select value={kind} onChange={e => setKind(e.target.value)}><option value="MARKET">Market</option><option value="LIMIT">Limit</option><option value="STOP">Stop market</option></select></label>
             <label>Quantity<input type="number" min="1" max="100000" step="1" required value={quantity} onChange={e => setQuantity(e.target.value)}/></label>
             {kind !== 'MARKET' && <label>{kind === 'LIMIT' ? 'Limit price (₹)' : 'Stop trigger (₹)'}<input type="number" min="0.01" max="1000000" step="0.01" required value={trigger} onChange={e => setTrigger(e.target.value)}/></label>}
-            <dl className="est"><div><dt>Order value</dt><dd>{money(notional)}</dd></div><div><dt>Estimated fee</dt><dd>{money(estFee)}</dd></div><div><dt>Buying power</dt><dd>{money(account?.available)}</dd></div></dl>
-            <button className="primary" disabled={busy || !active || (mode === "live" && !active.liveConfigured) || (kind === 'MARKET' && (!tradeable || !!error))}>{busy ? 'Submitting…' : 'Place paper ' + side.toLowerCase()}</button>
+            <dl className="est"><div><dt>Order value</dt><dd>{money(notional)}</dd></div><div><dt>Estimated fee</dt><dd>{money(estFee)}</dd></div><div><dt>Buying power</dt><dd>{money(account?.available)}</dd></div>
+              {secured && <><div><dt>Cash balance</dt><dd>{money(account?.cash)}</dd></div><div><dt>Reserved cash</dt><dd>{money(account?.reserved)}</dd></div></>}
+              {secured && side === 'SELL' && <div><dt>Available shares</dt><dd>{account?.holdings.find(h => h.symbol === symbol)?.availableQuantity ?? 0}</dd></div>}</dl>
+            <button className="primary" disabled={busy || pending || !active || (mode === "live" && !active.liveConfigured) || (kind === 'MARKET' && (!tradeable || !!error))}>{busy ? 'Submitting…' : 'Place paper ' + side.toLowerCase()}</button>
             <p className="ticket-note">{kind === 'MARKET' && !tradeable ? 'Waiting for a tradeable quote.' : 'Fills use virtual funds and simulated fees.'}</p>
+            {pending && <div className="feedback">
+              <p>Confirm the previous submission before placing another order.</p>
+              <button type="button" className="quiet" disabled={busy} onClick={() => reconcile()}>Resolve pending order</button>
+            </div>}
             {orderMessage && <p className="feedback" role="status">{orderMessage}</p>}
           </form>
         </section>
       </div>
-      <div className="lower-grid">
+      <div className={secured ? "lower-grid single-portfolio" : "lower-grid"}>
         <section className="panel portfolio" id="portfolio">
           <div className="panel-title"><ListOrdered size={16}/><h2>Paper portfolio</h2><button className="quiet export" disabled={!account?.orders.length} onClick={download}><ArrowDownToLine size={14}/> CSV</button></div>
           <div className="balances">{[['Equity',account?.equity],['Available cash',account?.available],['Unrealized P&L',account?.unrealized],['Realized P&L',account?.realized]].map(([label,v]) =>
             <div key={label}><span>{label}</span><strong className="mono">{money(v)}</strong></div>)}</div>
-          <div className="tabs account-tabs">{['Positions', 'Orders'].map(t => <button key={t} className={accountTab === t ? 'selected' : ''} onClick={() => setAccountTab(t)}>{t} <span>{t === 'Orders' ? working.length + ' open' : account?.holdings.length ?? 0}</span></button>)}</div>
+          <div className="tabs account-tabs">{['Positions', 'Orders'].map(t => <button key={t} className={accountTab === t ? 'selected' : ''} onClick={() => setAccountTab(t)}>{t} <span>{t === 'Orders' ? (secured ? '' : working.length + ' open') : account?.holdings.length ?? 0}</span></button>)}</div>
           <div className="table-scroll">
             {accountTab === 'Positions' ? <table><thead><tr><th>Symbol</th><th>Shares</th><th>Avg. cost</th><th>Market value</th><th>P&L</th></tr></thead><tbody>
               {account?.holdings.map(h => <tr key={h.symbol}><th scope="row">{h.symbol}</th><td>{h.quantity}</td><td>{money(h.cost / h.quantity)}</td><td>{money(h.value)}</td><td className={tone(h.pnl)}>{money(h.pnl)}</td></tr>)}
               {!account?.holdings.length && <tr><td colSpan="5" className="empty">Your filled positions will appear here.</td></tr>}
-            </tbody></table> : <table><thead><tr><th>Symbol</th><th>Order</th><th>Shares</th><th>Price</th><th>Status</th></tr></thead><tbody>
-              {account?.orders.map(o => <tr key={o.id}><th scope="row">{o.symbol}</th><td>{o.side} {o.kind}</td><td>{o.quantity}</td><td>{money(o.fill ?? o.trigger)}</td><td>{o.status === 'OPEN' ? <button className="quiet" disabled={busy} onClick={() => cancel(o.id)} aria-label={'Cancel order for ' + o.symbol}>Cancel</button> : o.status}</td></tr>)}
-              {!account?.orders.length && <tr><td colSpan="5" className="empty">No paper orders yet.</td></tr>}
+            </tbody></table> : <table><thead><tr><th>Symbol</th><th>Order</th><th>Shares</th><th>Price</th>{secured && <th>Fee</th>}<th>Status</th></tr></thead><tbody>
+              {account?.orders.map(o => <tr key={o.id}><th scope="row">{o.symbol}</th><td>{o.side} {o.kind}</td><td>{o.quantity}</td><td>{money(o.fill ?? o.trigger)}</td>{secured && <td>{money(o.fee)}</td>}<td>{secured && o.status === 'OPEN' && 'OPEN · '}{o.status === 'OPEN' ? <button className="quiet" disabled={busy} onClick={() => cancel(o.id)} aria-label={'Cancel order for ' + o.symbol}>Cancel</button> : secured && o.status === "REJECTED" ? describeOrder(o, money) : o.status}</td></tr>)}
+              {!account?.orders.length && <tr><td colSpan={secured ? 6 : 5} className="empty">No paper orders yet.</td></tr>}
             </tbody></table>}
           </div>
+          {secured && accountTab === 'Orders' && <div className="account-tabs tabs">
+            <button disabled={!offset} onClick={() => setOffset(Math.max(0, offset - 25))}>Previous</button>
+            <button disabled={active?.nextOffset == null} onClick={() => setOffset(active.nextOffset)}>Next</button>
+          </div>}
         </section>
-        <section className="panel research" id="research">
+        {!secured && <section className="panel research" id="research">
           <div className="panel-title"><FlaskConical size={16}/><h2>Research lab</h2></div>
           <p className="muted">Explore price behavior, portfolio exposure and risk metrics.</p>
           <div className="research-actions"><button className="quiet" disabled={analysisBusy || !active} onClick={() => analyze('stock')}>Analyze {ticker(symbol)}</button>
@@ -318,7 +376,7 @@ function App() {
               <div><strong>{o.label}</strong><b className="mono">{o.value}</b></div><p>{o.detail}</p></div>)}
             {!visibleReport.observations.length && <p className="muted">There is insufficient market data for this report.</p>}
           </div> : !analysisBusy && <div className="research-note"><Clock3 size={15}/> Observations use available data and explain how each metric is calculated.</div>}
-        </section>
+        </section>}
       </div>
       <footer>Tape · Paper trading workspace <span>All balances and orders are simulated.</span></footer>
     </main>

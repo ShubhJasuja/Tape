@@ -1,6 +1,7 @@
 package in.practice.tape;
 
 import org.springframework.context.annotation.Profile;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.security.core.userdetails.User;
@@ -43,11 +44,14 @@ class AccountDirectory {
     }
 
     private final JdbcTemplate db;
+    private final boolean demoTrading;
     private final TransactionTemplate transactions;
     private final PasswordEncoder passwords;
 
-    AccountDirectory(JdbcTemplate db, TransactionTemplate transactions, PasswordEncoder passwords) {
+    AccountDirectory(JdbcTemplate db, TransactionTemplate transactions, PasswordEncoder passwords,
+                     @Value("${tape.synthetic-trading.enabled:false}") boolean demoTrading) {
         this.db = db;
+        this.demoTrading = demoTrading;
         this.transactions = transactions;
         this.passwords = passwords;
     }
@@ -69,7 +73,7 @@ class AccountDirectory {
             if (inserted == 0) throw new ResponseStatusException(HttpStatus.CONFLICT);
             for (String mode : List.of("DEMO", "PERMITTED_MARKET_DATA")) {
                 UUID accountId = UUID.randomUUID();
-                db.update("INSERT INTO trading_accounts (id,user_id,mode) VALUES (?,?,?)", accountId, userId, mode);
+                db.update("INSERT INTO trading_accounts (id,user_id,mode,trading_enabled) VALUES (?,?,?,?)", accountId, userId, mode, "DEMO".equals(mode));
                 db.update("INSERT INTO wallets (account_id,balance_paise) VALUES (?,?)", accountId, OPENING_CASH);
                 db.update("""
                     INSERT INTO cash_ledger_entries (id,account_id,kind,amount_paise) VALUES (?,?,'OPENING_BALANCE',?)
@@ -99,7 +103,7 @@ class AccountDirectory {
     private List<Account> read(String sql, Object... parameters) {
         return db.query(sql, (rs, row) -> new Account(rs.getObject(1, UUID.class),
             "DEMO".equals(rs.getString(2)) ? "DEMO" : "LIVE_DATA", rs.getString(3), rs.getLong(5),
-            rs.getLong(6), rs.getBoolean(4)), parameters);
+            rs.getLong(6), demoTrading && rs.getBoolean(4)), parameters);
     }
 
     static String normalizedEmail(String input) {

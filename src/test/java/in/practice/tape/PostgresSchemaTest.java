@@ -54,7 +54,7 @@ class PostgresSchemaTest {
         var owner = user();
         try (var application = startApplication()) {
             assertIsolatedDataSources(application);
-            assertEquals(List.of("1", "2", "3"), pg.queryForList(
+            assertEquals(List.of("1", "2", "3", "4"), pg.queryForList(
                 "SELECT version FROM flyway_schema_history WHERE success ORDER BY installed_rank", String.class));
             assertEquals(1L, count("SELECT count(*) FROM users WHERE id = ?", owner));
         }

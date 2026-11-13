@@ -159,7 +159,7 @@ class Market {
         return json.readTree(response.body());
     }
 
-    private static long demoClose(Instrument i, int n) {
+    static long demoClose(Instrument i, int n) {
         double phase = Math.floorMod(i.symbol().hashCode(), 7) * 0.45;
         return Math.round(i.base() * (0.92 + n * 0.001 + Math.sin(n * 0.24 + phase) * 0.018 +
             Math.sin(n * 1.31 + phase) * 0.008));

@@ -18,3 +18,4 @@
   .account-panel { padding: 16px; }
   .account-session { gap: 8px; }
 }
+.lower-grid.single-portfolio { grid-template-columns: minmax(0, 1fr); }

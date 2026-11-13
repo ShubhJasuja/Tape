@@ -68,6 +68,12 @@ class AccountSecurity {
                 .requestMatchers(HttpMethod.GET, "/", "/index.html", "/assets/**", "/api/v1/auth/csrf").permitAll()
                 .requestMatchers(HttpMethod.POST, "/api/v1/auth/register", "/api/v1/auth/login").permitAll()
                 .requestMatchers(HttpMethod.GET, "/api/v1/auth/me", "/api/v1/accounts", "/api/v1/accounts/*").authenticated()
+                .requestMatchers(HttpMethod.GET, "/api/v1/accounts/*/orders", "/api/v1/accounts/*/orders/*",
+                    "/api/v1/accounts/*/order-requests/*", "/api/v1/accounts/*/wallet", "/api/v1/accounts/*/portfolio",
+                    "/api/v1/accounts/*/market", "/api/v1/accounts/*/candles").authenticated()
+                .requestMatchers(HttpMethod.POST, "/api/v1/accounts/*/orders").authenticated()
+                .requestMatchers(HttpMethod.DELETE, "/api/v1/accounts/*/orders/*").authenticated()
+                .requestMatchers(HttpMethod.PUT, "/api/v1/accounts/*/watchlist").authenticated()
                 .anyRequest().denyAll())
             .exceptionHandling(errors -> errors
                 .authenticationEntryPoint((request, response, failure) -> response.setStatus(401))

@@ -1,6 +1,6 @@
 # Tape account workspace
 
-Stage 2B provides authenticated, read-only account balances on PostgreSQL. Registration provisions a demo wallet and a live-data wallet with ₹10,00,000 each. Both modes have trading disabled. The existing H2 terminal remains a separate loopback development mode with shared state.
+The account workspace provides authenticated PostgreSQL balances and optional synthetic Demo trading. Registration provisions a demo wallet and a live-data wallet with ₹10,00,000 each. Demo trading is off by default and can be enabled with the [trading setup](trading.md#enable-a-local-demo-workspace). Live-data trading stays disabled. The existing H2 terminal remains a separate loopback development mode with shared state.
 
 ## API contract
 
@@ -22,7 +22,7 @@ Emails are case-insensitive and normalized to lowercase. The local form accepts 
 
 ## Profiles and local setup
 
-1. Start the [loopback PostgreSQL Compose service](database.md#profiles-and-local-setup) and apply Flyway migrations through the `postgres-dev` schema profile with the database owner. Wait for V3 to complete, then stop that application process. Keep the original H2 profile separate.
+1. Start the [loopback PostgreSQL Compose service](database.md#profiles-and-local-setup) and apply Flyway migrations through the `postgres-dev` schema profile with the database owner. Wait for V4 to complete, then stop that application process. Keep the original H2 profile separate.
 2. As a database administrator, create a LOGIN role named `tape_runtime` with no role memberships, schema ownership, DDL, or administrative privileges. Set its password using your secret manager or the interactive psql password command. Run [accounts-runtime-grants.sql](accounts-runtime-grants.sql) against the `tape` database as its owner. If you use a differently named database or role, adjust the grant script for that environment.
 3. Set `TAPE_ACCOUNTS_URL` if the PostgreSQL JDBC URL differs from the Compose default. Set `TAPE_ACCOUNTS_USER` if the runtime role differs, and provide `TAPE_ACCOUNTS_PASSWORD` via the environment. Build the frontend as described in the README.
 4. Start local account mode with:
@@ -40,9 +40,9 @@ Flyway is disabled by default for the runtime process. A controlled migration ru
 ## Security assumptions and limits
 
 - Spring Security authenticates a server-side session, rotates its ID on login, and uses an HttpOnly, SameSite=Lax cookie with a 20-minute inactivity timeout. The account UI stores no credentials, session identifiers, or CSRF token in browser storage.
-- The security chain explicitly allows the account API and static entry assets. Other routes are denied. The legacy controller and scheduler are absent from account mode. No credentialed cross-origin policy is configured.
+- The security chain explicitly allows the account and [synthetic trading APIs](trading.md#trading-api) and static entry assets. Other routes are denied. The legacy controller and scheduler are absent from account mode. No credentialed cross-origin policy is configured.
 - Authentication limits are per process. They cap login attempts per source and normalized identity and registration and CSRF-token requests per source. A future shared deployment needs a trusted edge limit and shared abuse controls, particularly if proxying or running replicas. Sessions are local to the application process. Restarting it signs users out.
-- Account authorization is enforced in server queries. The database runtime role has only the operations needed for provisioning and reading accounts. It can still read across owners at the SQL level, so future account endpoints must preserve principal scoping. Trading, reconciliation, email verification, password recovery and permissions for live data are outside this stage. A duplicate-email response indicates that the email is already registered.
+- Account authorization is enforced in server queries. The database runtime role starts with provisioning and account-read privileges. Synthetic trading uses additional narrowly scoped grants. It can still read across owners at the SQL level, so future account endpoints must preserve principal scoping. Email verification, password recovery, and permissions for live data remain outside this stage. A duplicate-email response indicates that the email is already registered.
 - Legacy H2 accounts remain shared. No H2 users, trades, or watchlists were imported. Never serve the legacy routes through a public proxy.
 
 Run the HTTP and PostgreSQL security integration tests with `./mvnw.cmd --batch-mode clean verify "-Dtape.postgres.tests=true"` and Docker running. The tests use a disposable database and separate limited runtime role.
