@@ -258,6 +258,11 @@ class AccountSecurityTest {
     }
 
     static ConfigurableApplicationContext startApplication(boolean localMode, boolean trading, boolean matcher) {
+        return startApplication(localMode, trading, matcher, Map.of());
+    }
+
+    static ConfigurableApplicationContext startApplication(boolean localMode, boolean trading, boolean matcher,
+                                                           Map<String, Object> overrides) {
         var profiles = localMode ? new String[]{"accounts", "accounts-local"} : new String[]{"accounts"};
         var settings = new java.util.HashMap<String, Object>(Map.of(
             "TAPE_ACCOUNTS_URL", POSTGRES.getJdbcUrl(), "TAPE_ACCOUNTS_PASSWORD", runtimePassword,
@@ -269,6 +274,8 @@ class AccountSecurityTest {
             settings.put("server.forward-headers-strategy", "native");
             settings.put("server.tomcat.remoteip.internal-proxies", "127\\.0\\.0\\.1");
         }
+        settings.put("TAPE_RECONCILIATION_SCHEDULED", false);
+        settings.putAll(overrides);
         return new SpringApplicationBuilder(Tape.class).profiles(profiles)
             .initializers(context -> context.getEnvironment().getPropertySources()
                 .addFirst(new MapPropertySource("accounts-test", settings)))

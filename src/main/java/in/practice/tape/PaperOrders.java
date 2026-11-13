@@ -1,6 +1,7 @@
 package in.practice.tape;
 
 import org.springframework.context.annotation.Profile;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -61,20 +62,29 @@ class PaperOrders {
     record Holding(String symbol, long quantity, long reservedQuantity, long availableQuantity,
                    long costPaise, long markPaise, long valuePaise, long unrealizedPaise) {}
     record Portfolio(Wallet wallet, List<Holding> positions, long equityPaise, long realizedPaise, long unrealizedPaise) {}
-    record Candidate(UUID owner, UUID account, UUID order) {}
+    record Candidate(UUID owner, UUID account, UUID order, Instant createdAt) {
+        Candidate(UUID owner, UUID account, UUID order) { this(owner, account, order, Instant.EPOCH); }
+    }
 
     private final JdbcTemplate db;
     private final TransactionTemplate writes;
     private final TransactionTemplate reads;
     private final SyntheticQuotes quotes;
     private final boolean enabled;
+    private final TradingMetrics metrics;
 
+    PaperOrders(JdbcTemplate db, TransactionTemplate transactions, SyntheticQuotes quotes, boolean enabled) {
+        this(db, transactions, quotes, enabled, null);
+    }
+
+    @Autowired
     PaperOrders(JdbcTemplate db, TransactionTemplate transactions, SyntheticQuotes quotes,
-                @Value("${tape.synthetic-trading.enabled:false}") boolean enabled) {
+                @Value("${tape.synthetic-trading.enabled:false}") boolean enabled, TradingMetrics metrics) {
         this.db = db;
         this.writes = transactions;
         this.quotes = quotes;
         this.enabled = enabled;
+        this.metrics = metrics;
         reads = new TransactionTemplate(Objects.requireNonNull(transactions.getTransactionManager()));
         reads.setReadOnly(true);
         reads.setIsolationLevel(TransactionDefinition.ISOLATION_REPEATABLE_READ);
@@ -134,16 +144,28 @@ class PaperOrders {
         });
     }
 
-    List<Candidate> candidates() {
+    List<Candidate> candidates(Candidate after, int limit) {
+        var params = new java.util.ArrayList<Object>();
+        String next = "";
+        if (after != null) {
+            next = " AND (o.account_id,o.created_at,o.id) > (?,?,?)";
+            params.add(after.account());
+            params.add(Timestamp.from(after.createdAt()));
+            params.add(after.order());
+        }
+        params.add(OperationsWorker.checkedBatch(limit));
         return db.query("""
-            SELECT a.user_id,a.id,o.id FROM orders o JOIN trading_accounts a ON a.id=o.account_id
+            SELECT a.user_id,a.id,o.id,o.created_at FROM orders o JOIN trading_accounts a ON a.id=o.account_id
             WHERE a.mode='DEMO' AND a.trading_enabled AND o.status='OPEN' AND o.kind<>'MARKET'
-            ORDER BY a.id,o.created_at,o.id
-            """, (rs, row) -> new Candidate(rs.getObject(1, UUID.class), rs.getObject(2, UUID.class), rs.getObject(3, UUID.class)));
+            """ + next + " ORDER BY o.account_id,o.created_at,o.id LIMIT ?",
+            (rs, row) -> new Candidate(rs.getObject(1, UUID.class), rs.getObject(2, UUID.class),
+                rs.getObject(3, UUID.class), rs.getTimestamp(4).toInstant()), params.toArray());
     }
 
     void match(Candidate candidate) {
         writes.executeWithoutResult(ignored -> {
+            db.execute("SET LOCAL lock_timeout = '1s'");
+            db.execute("SET LOCAL statement_timeout = '5s'");
             UUID account = candidate.account();
             Wallet wallet = lock(candidate.owner(), account);
             Order order = requireOrder(account, candidate.order());
@@ -212,6 +234,7 @@ class PaperOrders {
         post(account, execution, "FEE", negateExact(fee));
         updateWallet(account, cash, wallet.reservedPaise());
         savePosition(account, order.instrumentId(), quantity, position.reserved(), cost);
+        if (metrics != null) metrics.executionCommitted();
     }
 
     private void post(UUID account, UUID execution, String kind, long amount) {
@@ -376,6 +399,7 @@ class PaperOrders {
                 positions.put(fill.instrument(), new Position(addExact(position.quantity(), fill.quantity()), 0,
                     addExact(position.cost(), addExact(fill.gross(), fill.fee()))));
             } else {
+                if (fill.quantity() > position.quantity()) throw new ArithmeticException("Invalid execution sequence");
                 long allocated = allocated(position.cost(), fill.quantity(), position.quantity());
                 realized = addExact(realized, subtractExact(subtractExact(fill.gross(), fill.fee()), allocated));
                 positions.put(fill.instrument(), new Position(subtractExact(position.quantity(), fill.quantity()), 0,
@@ -386,13 +410,60 @@ class PaperOrders {
     }
 
     List<String> reconcile(UUID owner, UUID account) {
-        return owned(owner, account, () -> {
+        return reads.execute(ignored -> {
+            db.execute("SET TRANSACTION READ ONLY");
             var issues = new java.util.ArrayList<String>();
+            if (!Boolean.TRUE.equals(db.queryForObject("""
+                SELECT EXISTS (SELECT 1 FROM trading_accounts WHERE id=? AND user_id=? AND mode='DEMO')
+                """, Boolean.class, account, owner))) throw error(HttpStatus.NOT_FOUND, "ACCOUNT_NOT_FOUND");
+            db.execute("SET LOCAL statement_timeout = '5s'");
             Wallet wallet = readWallet(account, false);
             var posted = db.queryForObject("SELECT coalesce(sum(amount_paise),0) FROM cash_ledger_entries WHERE account_id=?",
                 BigDecimal.class, account);
             if (posted.compareTo(BigDecimal.valueOf(wallet.balancePaise())) != 0) issues.add("WALLET_BALANCE");
-            var replayed = replay(account).positions();
+            if (!Boolean.TRUE.equals(db.queryForObject("""
+                SELECT count(*)=1 AND coalesce(sum(amount_paise),0)=100000000 FROM cash_ledger_entries
+                WHERE account_id=? AND kind='OPENING_BALANCE'
+                """, Boolean.class, account))) issues.add("OPENING_FUNDING");
+            if (Boolean.TRUE.equals(db.queryForObject("""
+                SELECT EXISTS (
+                  SELECT o.id FROM orders o LEFT JOIN executions e ON e.order_id=o.id
+                  WHERE o.account_id=? GROUP BY o.id
+                  HAVING count(e.id) <> CASE WHEN o.status='FILLED' THEN 1 ELSE 0 END
+                    OR coalesce(bool_or(e.quantity<>o.quantity OR e.fee_paise<>(e.gross_paise+1999)/2000
+                      OR e.quote_source IS DISTINCT FROM 'TAPE_SYNTHETIC_V1' OR e.quote_at IS NULL
+                      OR e.quote_at>e.executed_at OR date_trunc('milliseconds',e.executed_at)-e.quote_at>interval '6 seconds'
+                      OR (o.kind<>'MARKET' AND e.quote_at<date_trunc('milliseconds',o.created_at))
+                      OR (o.kind='LIMIT' AND ((o.side='BUY' AND e.price_paise>o.trigger_price_paise)
+                          OR (o.side='SELL' AND e.price_paise<o.trigger_price_paise)))
+                      OR (o.kind='STOP' AND ((o.side='BUY' AND e.price_paise<o.trigger_price_paise)
+                          OR (o.side='SELL' AND e.price_paise>o.trigger_price_paise)))) FILTER (WHERE e.id IS NOT NULL),false)
+                )
+                """, Boolean.class, account))) issues.add("EXECUTION_INTEGRITY");
+            if (Boolean.TRUE.equals(db.queryForObject("""
+                SELECT EXISTS (
+                  SELECT e.id FROM executions e JOIN orders o ON o.id=e.order_id
+                  LEFT JOIN cash_ledger_entries l ON l.execution_id=e.id
+                  WHERE e.account_id=? GROUP BY e.id,o.side
+                  HAVING count(l.id)<>2
+                     OR count(*) FILTER (WHERE l.kind='FEE' AND l.amount_paise=-e.fee_paise)<>1
+                     OR count(*) FILTER (WHERE
+                         (o.side='BUY' AND l.kind='TRADE_DEBIT' AND l.amount_paise=-e.gross_paise)
+                         OR (o.side='SELL' AND l.kind='TRADE_CREDIT' AND l.amount_paise=e.gross_paise))<>1
+                )
+                """, Boolean.class, account))) issues.add("EXECUTION_POSTINGS");
+            Replay history;
+            try { history = replay(account); }
+            catch (ArithmeticException invalid) {
+                issues.add("EXECUTION_REPLAY");
+                return List.copyOf(issues);
+            }
+            var replayed = history.positions();
+            var projectedCost = db.queryForObject("SELECT coalesce(sum(cost_paise),0) FROM positions WHERE account_id=?",
+                BigDecimal.class, account);
+            // With only opening funding and trade postings, realized P&L = cash + remaining cost - opening funding.
+            if (posted.add(projectedCost).subtract(BigDecimal.valueOf(Trading.STARTING_CASH))
+                .compareTo(BigDecimal.valueOf(history.realized())) != 0) issues.add("REALIZED_PNL");
             var pending = db.query(SELECT_ORDER + " AND o.status='OPEN'", ORDER, account);
             long cashReserved = 0;
             var sharesReserved = new java.util.HashMap<UUID, Long>();

@@ -305,6 +305,114 @@ class PaperTradingTest {
         }
     }
 
+    @Test
+    void matcherQueryLimitsResultsAndAdvancesPastUnfilledOrders() {
+        var a = account();
+        for (int i = 0; i < 4; i++) submit(first, a, ticket("BUY", "LIMIT", 1, "1.00"));
+        var seen = new java.util.HashSet<UUID>();
+        PaperOrders.Candidate cursor = null;
+        for (int page = 0; page < 100; page++) {
+            var candidates = first.candidates(cursor, 2);
+            assertTrue(candidates.size() <= 2);
+            if (candidates.isEmpty()) break;
+            for (var candidate : candidates) {
+                if (candidate.account().equals(a.account())) assertTrue(seen.add(candidate.order()));
+            }
+            cursor = candidates.getLast();
+        }
+        assertEquals(4, seen.size());
+    }
+
+    @Test
+    void scheduledReconciliationDetectsDriftAndLeavesItUntouched() throws Exception {
+        var a = account();
+        submit(first, a, ticket("BUY", "MARKET", 1, null));
+        admin.update("UPDATE wallets SET balance_paise=balance_paise+1 WHERE account_id=?", a.account);
+        admin.update("UPDATE positions SET quantity=quantity+1 WHERE account_id=?", a.account);
+        try (var scheduled = AccountSecurityTest.startApplication(true, true, false, java.util.Map.of(
+            "TAPE_RECONCILIATION_SCHEDULED", true, "TAPE_RECONCILIATION_DELAY_MS", 1000))) {
+            var registry = scheduled.getBean(io.micrometer.core.instrument.MeterRegistry.class);
+            var counter = registry.get("tape.reconciliation.accounts").tag("outcome", "mismatch").counter();
+            var deadline = Instant.now().plusSeconds(10);
+            while (counter.count() == 0 && Instant.now().isBefore(deadline)) Thread.sleep(50);
+            assertTrue(counter.count() > 0);
+        }
+        assertEquals(START - 10_004, first.wallet(a.owner, a.account).balancePaise());
+        assertEquals(2, first.portfolio(a.owner, a.account).positions().getFirst().quantity());
+        assertEquals(1, executions(a));
+        var issues = first.reconcile(a.owner, a.account);
+        assertTrue(issues.contains("WALLET_BALANCE"));
+        assertTrue(issues.stream().anyMatch(issue -> issue.startsWith("POSITION:")));
+    }
+
+    @Test
+    void missingWalletIsReportedWithoutRepairAndDoesNotStopOtherAccounts() {
+        var bad = UUID.randomUUID();
+        var owner = UUID.randomUUID();
+        admin.update("INSERT INTO users (id,identity_issuer,identity_subject) VALUES (?,'test',?)", owner, owner.toString());
+        admin.update("INSERT INTO trading_accounts (id,user_id,mode,trading_enabled) VALUES (?,?,'DEMO',true)", bad, owner);
+        var good = account();
+        var result = app.getBean(ReconciliationWorker.class).reconcileBatch();
+        assertTrue(result.errors() >= 1);
+        assertTrue(result.checked() > result.errors());
+        assertEquals(0, count("SELECT count(*) FROM wallets WHERE account_id=?", bad));
+        assertHealthy(good);
+    }
+
+    @Test
+    void immutableInconsistentExecutionIsReportedWithoutRepair() {
+        var a = account();
+        var order = submit(first, a, ticket("BUY", "MARKET", 1, null));
+        admin.update("""
+            INSERT INTO executions (id,order_id,account_id,instrument_id,quantity,price_paise,
+                gross_paise,fee_paise,executed_at)
+            VALUES (?,?,?,?,1,10000,10000,5,clock_timestamp())
+            """, UUID.randomUUID(), order.id(), a.account, order.instrumentId());
+        var issues = first.reconcile(a.owner, a.account);
+        assertTrue(issues.contains("EXECUTION_INTEGRITY"));
+        assertTrue(issues.contains("EXECUTION_POSTINGS"));
+        assertEquals(2, executions(a));
+    }
+
+    @Test
+    void opsRequiresExplicitTokenAndPublishesHealthAndCommittedMetrics() throws Exception {
+        String secret = UUID.randomUUID().toString().replace("-", "");
+        try (var ops = AccountSecurityTest.startApplication(true, true, false, java.util.Map.of("TAPE_OPS_TOKEN", secret))) {
+            var plain = new AccountSecurityTest.Browser(ops);
+            assertEquals(403, plain.get("/actuator/health/readiness").statusCode());
+            assertEquals(403, plain.write("POST", "/internal/ops/reconcile", "", null, false).statusCode());
+            String email = UUID.randomUUID() + "@example.test";
+            assertEquals(201, plain.register(email).statusCode());
+            assertEquals(204, plain.login(email, AccountSecurityTest.PASSWORD).statusCode());
+            assertEquals(403, plain.get("/actuator/metrics").statusCode());
+            var account = JSON.readTree(plain.get("/api/v1/accounts").body()).get(0).path("id").asText();
+            var submission = plain.write("POST", "/api/v1/accounts/" + account + "/orders",
+                marketJson(UUID.randomUUID()), "application/json", true);
+            assertEquals(200, submission.statusCode());
+            assertDoesNotThrow(() -> UUID.fromString(submission.headers().firstValue("X-Correlation-ID").orElseThrow()));
+
+            int port = ((org.springframework.boot.web.servlet.context.ServletWebServerApplicationContext) ops)
+                .getWebServer().getPort();
+            var http = java.net.http.HttpClient.newHttpClient();
+            for (String path : List.of("/actuator/health/liveness", "/actuator/health/readiness",
+                "/actuator/metrics/tape.orders.submissions", "/actuator/metrics/tape.orders.executions",
+                "/internal/ops/reconcile")) {
+                var request = java.net.http.HttpRequest.newBuilder(java.net.URI.create("http://127.0.0.1:" + port + path))
+                    .header("Authorization", "Bearer " + secret)
+                    .method(path.startsWith("/internal") ? "POST" : "GET", java.net.http.HttpRequest.BodyPublishers.noBody())
+                    .build();
+                var response = http.send(request, java.net.http.HttpResponse.BodyHandlers.ofString());
+                if (path.startsWith("/internal")) {
+                    assertTrue(List.of(200, 503).contains(response.statusCode()));
+                    assertTrue(JSON.readTree(response.body()).path("checked").asInt() > 0);
+                } else assertEquals(200, response.statusCode(), path);
+                if (path.startsWith("/actuator/health")) assertEquals("UP", JSON.readTree(response.body()).path("status").asText());
+                if (path.contains("executions")) assertEquals(1, JSON.readTree(response.body())
+                    .path("measurements").get(0).path("value").asInt());
+            }
+        }
+    }
+
     private static Client client() throws Exception {
         var browser = new AccountSecurityTest.Browser(app);
         String email = UUID.randomUUID() + "@example.test";

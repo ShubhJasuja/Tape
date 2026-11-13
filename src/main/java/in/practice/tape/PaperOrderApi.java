@@ -1,6 +1,8 @@
 package in.practice.tape;
 
+import org.slf4j.LoggerFactory;
 import org.springframework.context.annotation.Profile;
+import org.springframework.dao.DataAccessException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ProblemDetail;
 import org.springframework.http.ResponseEntity;
@@ -27,18 +29,32 @@ class PaperOrderApi {
     private final JdbcTemplate db;
     private final SyntheticQuotes quotes;
     private final Market market;
+    private final TradingMetrics metrics;
 
-    PaperOrderApi(PaperOrders orders, JdbcTemplate db, SyntheticQuotes quotes, Market market) {
+    PaperOrderApi(PaperOrders orders, JdbcTemplate db, SyntheticQuotes quotes, Market market, TradingMetrics metrics) {
         this.orders = orders;
         this.db = db;
         this.quotes = quotes;
         this.market = market;
+        this.metrics = metrics;
     }
 
     @PostMapping(value = "/orders", consumes = "application/json")
     PaperOrders.Order submit(@AuthenticationPrincipal AccountDirectory.Principal user, @PathVariable UUID account,
                              @RequestBody PaperOrders.Ticket ticket) {
-        return orders.submit(user.userId(), account, ticket);
+        var sample = metrics.start();
+        String outcome = "error";
+        try {
+            var order = orders.submit(user.userId(), account, ticket);
+            outcome = order.status().toLowerCase(java.util.Locale.ROOT);
+            return order;
+        } catch (ResponseStatusException failure) {
+            if (failure.getStatusCode().is4xxClientError()) outcome = "invalid";
+            throw failure;
+        } finally {
+            metrics.count("tape.orders.submissions", outcome);
+            metrics.stop(sample, "tape.orders.submission.duration", outcome);
+        }
     }
 
     @GetMapping("/orders")
@@ -108,6 +124,13 @@ class PaperOrderApi {
 
     @ExceptionHandler({HttpMessageNotReadableException.class, MethodArgumentTypeMismatchException.class})
     ResponseEntity<ProblemDetail> invalidRequest() { return problem(400, "INVALID_REQUEST"); }
+
+    @ExceptionHandler(DataAccessException.class)
+    ResponseEntity<ProblemDetail> databaseUnavailable(DataAccessException failure) {
+        LoggerFactory.getLogger(PaperOrderApi.class).atWarn()
+            .addKeyValue("error_type", failure.getClass().getSimpleName()).log("Synthetic trading database operation failed");
+        return problem(503, "DATABASE_UNAVAILABLE");
+    }
 
     @ExceptionHandler(ArithmeticException.class)
     ResponseEntity<ProblemDetail> numericLimit() { return problem(409, "ACCOUNT_LIMIT"); }

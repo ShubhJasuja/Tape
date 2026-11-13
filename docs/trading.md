@@ -39,6 +39,6 @@ A definitive rejection is an order result and is replayable. A request that fail
 
 ## Operations and remaining work
 
-Reconciliation currently runs through a service method and integration tests. It compares cash with postings, quantities and cost with execution replay, and reservations with open orders. It reports drift without altering records. Portfolio reads replay executions for realized P&L, and the single matcher scans open orders. These paths need operational metrics, bounded batches and load checks before shared deployment. Offset pagination may shift as new orders arrive.
+Scheduled reconciliation, bounded matching, probes, and metrics are described in the [operations guide](operations.md). Portfolio reads still replay executions for realized P&L. Offset pagination may shift as new orders arrive.
 
 The PostgreSQL workspace includes synthetic charts and owner-scoped watchlists. Research and external feeds remain in the separate legacy terminal. There is no historical H2 import. To disable new PostgreSQL orders and matching, turn off the trading flag and retain PostgreSQL data. Existing PostgreSQL reservations remain until processing resumes. Take a validated PostgreSQL backup before migration or rollback; do not reverse schema changes by editing applied migrations. Stage 2D should add reconciliation monitoring and rehearse any import before a coordinated cutover.
