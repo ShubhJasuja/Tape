@@ -24,6 +24,10 @@ The optional PostgreSQL workspace supports registration, sign-in, sign-out, and 
 
 The authenticated **Market data** workspace is disconnected by default. Once your permitted use is documented, follow the [market-data setup](docs/market-data.md) to configure the local owner and server-side Upstox Analytics Token. The old H2 live ledger remains available for review and cancellation.
 
+## Futures and options foundation
+
+Stage 2G adds a separate PostgreSQL derivatives book with versioned contracts, premiums, margin collateral, futures variation, and expiry events. The internal foundation is exercised against PostgreSQL 17. The terminal continues to offer synthetic equity execution. See the [derivatives architecture and test setup](docs/derivatives.md).
+
 ## Research and local AI
 
 **Analyze a stock** computes 20-session return, daily realized volatility, and maximum drawdown from daily synthetic closes. **Analyze portfolio** reports position and sector concentration, cash allocation, and return since inception in the legacy Demo terminal.

@@ -3,6 +3,7 @@ name: Build and test
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -33,5 +34,5 @@ jobs:
           distribution: temurin
           java-version: '21'
           cache: maven
-      - name: Verify Spring Boot backend
+      - name: Verify Java 21 backend and PostgreSQL 17 integrations
         run: ./mvnw --batch-mode clean verify -Dtape.postgres.tests=true
