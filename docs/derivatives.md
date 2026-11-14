@@ -30,6 +30,6 @@ Use Java 21, Docker Desktop and the Maven Wrapper. From the repository root run:
 
 On Linux use `./mvnw`. The flag enables PostgreSQL 17 Testcontainers, including fresh V7 installation, upgrade coverage, derivatives premium and variation accounting, risk rejection, reconciliation and equity regressions. The GitHub Actions workflow builds the existing React app with Node 22 and runs this Java suite on pushes, pull requests and manual runs. Test database roles and fixture credentials are disposable. No application database or market-data connection is required for verification.
 
-## Stage 2H prerequisites
+## Stage 2H practice execution
 
-Add a dedicated execution adapter and authenticated command layer only after authorization for the intended price source. Model order-specific reservations, fills and fees, current margin inputs, broker rules, margin calls and forced risk reduction. Verify expiry jobs, physical delivery completion, holiday calendars, multi-leg risk, failure recovery and complete end-to-end reconciliation before adding an F&O entry point.
+The isolated [options practice workspace](options-practice.md) adds authenticated execution for deterministic cash-settled fixtures. An external price source still requires authorization for virtual execution. Implement and verify futures daily marks, physical delivery, holiday calendars and broader risk rules before expanding supported contracts.

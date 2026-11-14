@@ -27,10 +27,14 @@ final class DerivativeContracts {
         long units(long lots) { return Math.multiplyExact(Math.multiplyExact(lots, lotSize), multiplier); }
     }
 
-    private static final RowMapper<Spec> SPEC = (rs, row) -> new Spec(rs.getObject("contract_id", UUID.class),
+    static final RowMapper<Spec> SPEC = (rs, row) -> new Spec(rs.getObject("contract_id", UUID.class),
         rs.getInt("version"), rs.getTimestamp("effective_at").toInstant(), rs.getInt("lot_size"), rs.getInt("multiplier"),
         rs.getLong("tick_paise"), rs.getLong("initial_margin_paise"), rs.getLong("maintenance_margin_paise"),
         rs.getInt("max_lots"), rs.getLong("max_order_notional_paise"));
+    static final RowMapper<Contract> CONTRACT = (rs, row) -> new Contract(rs.getObject("id", UUID.class),
+        rs.getString("source"), rs.getString("source_key"), rs.getString("exchange"), rs.getString("underlying_key"),
+        Underlying.valueOf(rs.getString("underlying_kind")), Kind.valueOf(rs.getString("kind")),
+        rs.getTimestamp("expiry_at").toInstant(), rs.getLong("strike_paise"), Settlement.valueOf(rs.getString("settlement")));
     private final JdbcTemplate db;
 
     DerivativeContracts(JdbcTemplate db) { this.db = db; }
@@ -61,10 +65,7 @@ final class DerivativeContracts {
     Contract contract(UUID id) {
         return db.query("""
             SELECT * FROM derivative_contracts WHERE id=?
-            """, (rs, row) -> new Contract(rs.getObject("id", UUID.class), rs.getString("source"), rs.getString("source_key"),
-            rs.getString("exchange"), rs.getString("underlying_key"), Underlying.valueOf(rs.getString("underlying_kind")),
-            Kind.valueOf(rs.getString("kind")), rs.getTimestamp("expiry_at").toInstant(), rs.getLong("strike_paise"),
-            Settlement.valueOf(rs.getString("settlement"))), id).stream().findFirst()
+            """, CONTRACT, id).stream().findFirst()
             .orElseThrow(() -> DerivativeBook.reject("CONTRACT_NOT_FOUND"));
     }
 

@@ -37,7 +37,14 @@ final class DerivativeBook {
     record AccountState(Wallet wallet, Map<UUID, Position> positions, long realized) {}
     record Event(long seq, UUID request, UUID contract, Integer version, String kind, Long price, LocalDate day,
                  long lots, long basis, long premium, long cash, long reserved, long collateral, long realized,
-                 long deliveryUnits, long deliveryCash, long deliveryCollateral, Instant occurredAt) {}
+                 long deliveryUnits, long deliveryCash, long deliveryCollateral, Instant occurredAt, long fee) {
+        Event(long seq, UUID request, UUID contract, Integer version, String kind, Long price, LocalDate day,
+              long lots, long basis, long premium, long cash, long reserved, long collateral, long realized,
+              long deliveryUnits, long deliveryCash, long deliveryCollateral, Instant occurredAt) {
+            this(seq, request, contract, version, kind, price, day, lots, basis, premium, cash, reserved, collateral,
+                realized, deliveryUnits, deliveryCash, deliveryCollateral, occurredAt, 0);
+        }
+    }
 
     private static final RowMapper<Event> EVENT = (rs, row) -> new Event(rs.getLong("seq"),
         rs.getObject("request_id", UUID.class), rs.getObject("contract_id", UUID.class), rs.getObject("spec_version", Integer.class),
@@ -45,7 +52,7 @@ final class DerivativeBook {
         rs.getLong("signed_lots"), rs.getLong("basis_delta_paise"), rs.getLong("premium_paise"), rs.getLong("cash_delta_paise"),
         rs.getLong("reserve_delta_paise"), rs.getLong("collateral_delta_paise"), rs.getLong("realized_paise"),
         rs.getLong("delivery_units"), rs.getLong("delivery_cash_paise"), rs.getLong("delivery_collateral_paise"),
-        rs.getTimestamp("occurred_at").toInstant());
+        rs.getTimestamp("occurred_at").toInstant(), rs.getLong("fee_paise"));
 
     DerivativeBook(JdbcTemplate db, TransactionTemplate tx, Clock clock) {
         this.db = db;
@@ -92,10 +99,16 @@ final class DerivativeBook {
     }
 
     Event fill(UUID owner, UUID account, UUID request, UUID contractId, long signedQuantity, long price) {
+        return fill(owner, account, request, contractId, signedQuantity, price, 0);
+    }
+
+    Event fill(UUID owner, UUID account, UUID request, UUID contractId, long signedQuantity, long price, long fee) {
         return locked(owner, account, request, () -> {
+            if (fee < 0) throw reject("INVALID_FEE");
+            bounded(fee);
             var prior = existing(account, request);
             if (prior != null) {
-                if (!"FILL".equals(prior.kind()) || !prior.contract().equals(contractId) || prior.price() != price ||
+                if (!"FILL".equals(prior.kind()) || !prior.contract().equals(contractId) || prior.price() != price || prior.fee() != fee ||
                     multiplyExact(prior.lots(), contracts.version(contractId, prior.version()).lotSize()) != signedQuantity) {
                     throw reject("REQUEST_CONFLICT");
                 }
@@ -130,7 +143,7 @@ final class DerivativeBook {
             long marginDelta = collateral - before.collateral();
             boolean future = contract.kind() == Kind.FUTURE;
             long premium = future ? 0 : -Long.signum(delta) * notional;
-            long cash = future ? realized : premium;
+            long cash = bounded(subtractExact(future ? realized : premium, fee));
             Wallet book = wallet(account);
             Wallet next = move(book, cash, 0, marginDelta);
             if (!future && next.available() < 0) throw reject("INSUFFICIENT_MARGIN");
@@ -140,7 +153,8 @@ final class DerivativeBook {
                 next.available() < openingShortPremium)) throw reject("INSUFFICIENT_MARGIN");
             return apply(account, contractId, next, new Position(net, basis, collateral, spec.version()),
                 new Event(0, request, contractId, spec.version(), "FILL", price, null, delta,
-                    basis - before.basis(), premium, cash, 0, marginDelta, realized, 0, 0, 0, at));
+                    basis - before.basis(), premium, cash, 0, marginDelta, bounded(subtractExact(realized, fee)),
+                    0, 0, 0, at, fee));
         });
     }
 
@@ -280,11 +294,11 @@ final class DerivativeBook {
         return db.queryForObject("""
             INSERT INTO derivative_events(account_id,request_id,contract_id,spec_version,kind,price_paise,session_day,
                 signed_lots,basis_delta_paise,premium_paise,cash_delta_paise,reserve_delta_paise,collateral_delta_paise,
-                realized_paise,delivery_units,delivery_cash_paise,delivery_collateral_paise,occurred_at,recorded_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING *
+                realized_paise,delivery_units,delivery_cash_paise,delivery_collateral_paise,occurred_at,recorded_at,fee_paise)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING *
             """, EVENT, account, e.request(), e.contract(), e.version(), e.kind(), e.price(), e.day(), e.lots(), e.basis(),
             e.premium(), e.cash(), e.reserved(), e.collateral(), e.realized(), e.deliveryUnits(), e.deliveryCash(),
-            e.deliveryCollateral(), Timestamp.from(e.occurredAt()), Timestamp.from(now()));
+            e.deliveryCollateral(), Timestamp.from(e.occurredAt()), Timestamp.from(now()), e.fee());
     }
 
     private Event existing(UUID account, UUID request) {
@@ -332,7 +346,7 @@ final class DerivativeBook {
 
     private Instant now() { return clock.instant().truncatedTo(ChronoUnit.MICROS); }
 
-    private Wallet wallet(UUID account) {
+    Wallet wallet(UUID account) {
         return db.query("SELECT * FROM derivative_books WHERE account_id=?", (rs, row) ->
             new Wallet(rs.getLong("cash_paise"), rs.getLong("reserved_paise"), rs.getLong("collateral_paise")), account)
             .stream().findFirst().orElseThrow(() -> reject("BOOK_NOT_FOUND"));
@@ -343,7 +357,7 @@ final class DerivativeBook {
             book.cash(), book.reserved(), book.collateral(), account);
     }
 
-    private Position position(UUID account, UUID contract) {
+    Position position(UUID account, UUID contract) {
         return db.query("SELECT * FROM derivative_positions WHERE account_id=? AND contract_id=?", (rs, row) ->
             readPosition(rs), account, contract).stream().findFirst().orElse(FLAT);
     }
@@ -369,12 +383,12 @@ final class DerivativeBook {
         return new Wallet(bounded(addExact(book.cash(), cash)), nextReserved, nextCollateral);
     }
 
-    private static long bounded(long value) {
+    static long bounded(long value) {
         if (value < -MAX_PAISE || value > MAX_PAISE) throw reject("NUMERIC_LIMIT");
         return value;
     }
 
-    private <T> T locked(UUID owner, UUID account, UUID request, Supplier<T> action) {
+    <T> T locked(UUID owner, UUID account, UUID request, Supplier<T> action) {
         if (owner == null || account == null || request == null) throw reject("INVALID_REQUEST");
         try {
             return tx.execute(status -> {

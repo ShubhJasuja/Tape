@@ -50,11 +50,7 @@ class DerivativeBookTest {
     @BeforeEach
     void setup() {
         catalog = new DerivativeContracts(db);
-        book = new DerivativeBook(db, tx, new Clock() {
-            @Override public ZoneId getZone() { return ZoneOffset.UTC; }
-            @Override public Clock withZone(ZoneId zone) { return Clock.fixed(now, zone); }
-            @Override public Instant instant() { return now; }
-        });
+        book = new DerivativeBook(db, tx, bookClock());
         db.update("INSERT INTO users(id,identity_issuer,identity_subject) VALUES (?,'test',?)", user, user.toString());
         db.update("INSERT INTO trading_accounts(id,user_id,mode) VALUES (?,?,'DEMO')", account, user);
         db.update("INSERT INTO wallets(account_id,balance_paise) VALUES (?,1234)", account);
@@ -233,6 +229,193 @@ class DerivativeBookTest {
         assertThrows(DataAccessException.class, () -> db.update("UPDATE derivative_specs SET lot_size=1 WHERE contract_id=?", option.id()));
         db.update("UPDATE derivative_books SET cash_paise=cash_paise+1 WHERE account_id=?", account);
         code("JOURNAL_MISMATCH", () -> book.reconcile(user, account));
+    }
+
+    @Test
+    void practiceCallsAndPutsSupportBothDirectionsWithPremiumFeesAndPartialCloses() {
+        var session = practice();
+        var call = listed(session, Kind.CALL);
+        var put = listed(session, Kind.PUT);
+        var buy = session.place(call, PracticeOptions.Side.BUY, 3, null);
+        var sell = session.place(put, PracticeOptions.Side.SELL, 2, null);
+        assertEquals(-buy.fillPaise() * 30, buy.premiumPaise());
+        assertEquals(sell.fillPaise() * 20, sell.premiumPaise());
+        assertEquals(-200L, buy.realizedPaise());
+        assertEquals(-200L, sell.realizedPaise());
+        var initial = session.state();
+        assertEquals(100_000_000 + buy.premiumPaise() + sell.premiumPaise() - 400, initial.wallet().cash());
+        assertEquals(400_000, initial.wallet().collateral());
+
+        now = now.plusSeconds(50);
+        var partial = session.place(call, PracticeOptions.Side.SELL, 1, null);
+        assertEquals(partial.premiumPaise() + buy.premiumPaise() / 3 - 200, partial.realizedPaise());
+        var cover = session.place(put, PracticeOptions.Side.BUY, 1, null);
+        assertEquals(cover.premiumPaise() + sell.premiumPaise() / 2 - 200, cover.realizedPaise());
+        var reduced = session.state();
+        assertEquals(2, reduced.positions().get(call.id()).lots());
+        assertEquals(-1, reduced.positions().get(put.id()).lots());
+        assertEquals(200_000, reduced.wallet().collateral());
+
+        session.place(call, PracticeOptions.Side.SELL, 3, null);
+        session.place(put, PracticeOptions.Side.BUY, 2, null);
+        assertEquals(-1, session.state().positions().get(call.id()).lots());
+        assertEquals(1, session.state().positions().get(put.id()).lots());
+        session.place(call, PracticeOptions.Side.BUY, 1, null);
+        session.place(put, PracticeOptions.Side.SELL, 1, null);
+        assertTrue(session.state().positions().isEmpty());
+        assertEquals(0, session.state().wallet().collateral());
+    }
+
+    @Test
+    void practiceLimitsCancelRecoverAndSettleDeterministically() {
+        var session = practice();
+        var call = listed(session, Kind.CALL);
+        var put = listed(session, Kind.PUT);
+        var pending = session.place(call, PracticeOptions.Side.SELL, 2, 20_000L);
+        assertEquals("OPEN", pending.status());
+        assertEquals(400_200, session.state().wallet().reserved());
+        code("OPEN_ORDER_EXISTS", () -> session.place(call, PracticeOptions.Side.SELL, 1, null));
+        assertEquals("CANCELLED", session.options.cancel(session.owner, session.account, pending.id()).status());
+        assertEquals("CANCELLED", session.options.cancel(session.owner, session.account, pending.id()).status());
+        assertEquals(0, session.state().wallet().reserved());
+
+        long low = Math.min(call.markPaise(), put.markPaise());
+        var crossing = low == call.markPaise() ? put : call;
+        var open = session.place(crossing, PracticeOptions.Side.BUY, 1, crossing.markPaise() - 5);
+        assertEquals("OPEN", open.status());
+        assertEquals(open.limitPaise() * 10 + 200, session.state().wallet().reserved());
+        var restarted = new PracticeOptions(db, tx, bookClock(), true, 400);
+        for (int i = 0; i < 80 && PracticeOptionPrices.premium(catalog.contract(crossing.id()),
+            catalog.version(crossing.id(), crossing.specVersion()), now) > open.limitPaise(); i++) now = now.plusSeconds(5);
+        restarted.match(new PracticeOptions.Work(session.owner, session.account, open.id()));
+        var filled = restarted.view(session.owner, session.account, 0).orders().stream().filter(entry -> entry.id().equals(open.id())).findFirst().orElseThrow();
+        assertEquals("FILLED", filled.status());
+        assertEquals(200, filled.feePaise());
+        assertEquals(0, restarted.reconcile(session.owner, session.account).wallet().reserved());
+
+        var expire = session.place(crossing, PracticeOptions.Side.SELL, 1, 20_000L);
+        assertEquals("OPEN", expire.status());
+        now = crossing.expiry();
+        var work = new PracticeOptions.Work(session.owner, session.account, crossing.id());
+        restarted.settle(work);
+        restarted.settle(work);
+        var finalView = restarted.view(session.owner, session.account, 0);
+        assertTrue(finalView.positions().isEmpty());
+        assertEquals(0, finalView.balances().reservedPaise());
+        assertEquals(1, finalView.settlements().size());
+        long finalIndex = PracticeOptionPrices.underlying(now);
+        assertEquals(Math.max(0, crossing.kind() == Kind.CALL ? finalIndex - crossing.strikePaise() : crossing.strikePaise() - finalIndex) * 10,
+            finalView.settlements().getFirst().payoutPaise());
+        assertEquals("EXPIRED", finalView.orders().stream().filter(entry -> entry.id().equals(expire.id())).findFirst().orElseThrow().status());
+        code("CONTRACT_NOT_ACTIVE", () -> session.place(crossing, PracticeOptions.Side.BUY, 1, null));
+        restarted.reconcile(session.owner, session.account);
+    }
+
+    @Test
+    void practiceRejectsUnsupportedTermsAndUnfundedOrdersWithoutSideEffects() {
+        var session = practice();
+        var option = listed(session, Kind.PUT);
+        code("INVALID_REQUEST", () -> session.place(option, PracticeOptions.Side.BUY, 0, null));
+        code("INVALID_TICK", () -> session.place(option, PracticeOptions.Side.BUY, 1, 101L));
+        code("POSITION_LIMIT", () -> session.place(option, PracticeOptions.Side.BUY, option.maxLots() + 1, null));
+        code("UNSUPPORTED_CONTRACT", () -> session.options.submit(session.owner, session.account,
+            new PracticeOptions.Ticket(UUID.randomUUID(), contract(Kind.CALL, Settlement.PHYSICAL).id(), 1, PracticeOptions.Side.BUY, 1, null)));
+        book.open(session.owner, session.account, UUID.randomUUID(), 100);
+        code("INSUFFICIENT_MARGIN", () -> session.place(option, PracticeOptions.Side.BUY, 1, null));
+        code("INSUFFICIENT_MARGIN", () -> session.place(option, PracticeOptions.Side.SELL, 1, null));
+        code("INSUFFICIENT_MARGIN", () -> session.place(option, PracticeOptions.Side.SELL, 1, 20_000L));
+        assertTrue(session.options.view(session.owner, session.account, 0).orders().isEmpty());
+        assertEquals(100, session.state().wallet().available());
+        code("ACCOUNT_NOT_FOUND", () -> session.options.view(user, session.account, 0));
+    }
+
+    @Test
+    void changedSpecificationRollsBackMatchedFillAndReleasesOnlyItsOwnReserve() {
+        var session = practice();
+        var put = listed(session, Kind.PUT);
+        var call = session.options.view(session.owner, session.account, 0).chain().stream()
+            .filter(item -> item.kind() == Kind.CALL && item.strikePaise() == 100_000).reduce((first, last) -> last).orElseThrow();
+        var pending = session.place(call, PracticeOptions.Side.SELL, 1, call.markPaise() + 5);
+        var unaffected = session.place(put, PracticeOptions.Side.SELL, 1, 20_000L);
+        var spec = catalog.version(call.id(), call.specVersion());
+        catalog.addSpec(new Spec(call.id(), 2, now.plusSeconds(1), spec.lotSize(), spec.multiplier(), spec.tickPaise(),
+            spec.initialMarginPaise(), spec.maintenanceMarginPaise(), spec.maxLots(), spec.maxOrderNotionalPaise()));
+        for (int i = 0; i < 80 && PracticeOptionPrices.premium(catalog.contract(call.id()), spec, now) < pending.limitPaise(); i++) {
+            now = now.plusSeconds(5);
+        }
+        session.options.match(new PracticeOptions.Work(session.owner, session.account, pending.id()));
+        var rejected = session.options.view(session.owner, session.account, 0).orders().stream()
+            .filter(order -> order.id().equals(pending.id())).findFirst().orElseThrow();
+        assertEquals("REJECTED", rejected.status());
+        assertEquals("SPEC_CHANGED", rejected.reason());
+        var state = session.state();
+        assertEquals(100_000_000, state.wallet().cash());
+        assertEquals(unaffected.reservationPaise(), state.wallet().reserved());
+        assertTrue(state.positions().isEmpty());
+    }
+
+    @Test
+    void practiceDuplicateAndCancelVersusExecutionUseOneAccountLock() throws Exception {
+        var session = practice();
+        var put = listed(session, Kind.PUT);
+        var call = listed(session, Kind.CALL);
+        var ticket = new PracticeOptions.Ticket(UUID.randomUUID(), put.id(), put.specVersion(), PracticeOptions.Side.BUY, 1, null);
+        var pool = Executors.newFixedThreadPool(2);
+        try {
+            var start = new CountDownLatch(1);
+            Callable<PracticeOptions.Order> action = () -> {
+                start.await();
+                return session.options.submit(session.owner, session.account, ticket);
+            };
+            var first = pool.submit(action);
+            var second = pool.submit(action);
+            start.countDown();
+            assertEquals(first.get(10, TimeUnit.SECONDS), second.get(10, TimeUnit.SECONDS));
+            code("REQUEST_CONFLICT", () -> session.options.submit(session.owner, session.account,
+                new PracticeOptions.Ticket(ticket.requestId(), put.id(), put.specVersion(), PracticeOptions.Side.SELL, 1, null)));
+            var pending = session.place(call, PracticeOptions.Side.SELL, 1, call.markPaise() + 5);
+            assertEquals("OPEN", pending.status());
+            for (int i = 0; i < 80 && PracticeOptionPrices.premium(catalog.contract(call.id()),
+                catalog.version(call.id(), call.specVersion()), now) < pending.limitPaise(); i++) now = now.plusSeconds(5);
+            var race = new CountDownLatch(1);
+            var match = pool.submit(() -> { race.await(); session.options.match(new PracticeOptions.Work(session.owner, session.account, pending.id())); return null; });
+            var cancel = pool.submit(() -> { race.await(); return session.options.cancel(session.owner, session.account, pending.id()); });
+            race.countDown();
+            match.get(10, TimeUnit.SECONDS);
+            var result = cancel.get(10, TimeUnit.SECONDS);
+            assertTrue(result.status().equals("FILLED") || result.status().equals("CANCELLED"));
+            assertEquals(result.status().equals("FILLED") ? 1L : 0L, db.queryForObject(
+                "SELECT count(*) FROM derivative_events WHERE account_id=? AND request_id=?", Long.class, session.account, pending.id()));
+            assertEquals(0, session.state().wallet().reserved());
+            assertEquals(1, session.state().positions().get(put.id()).lots());
+        } finally { pool.shutdownNow(); }
+    }
+
+    private record Practice(UUID owner, UUID account, PracticeOptions options) {
+        PracticeOptions.Order place(PracticeOptions.Listing listing, PracticeOptions.Side side, int lots, Long limit) {
+            return options.submit(owner, account, new PracticeOptions.Ticket(UUID.randomUUID(), listing.id(), listing.specVersion(), side, lots, limit));
+        }
+        DerivativeBook.AccountState state() { return options.reconcile(owner, account); }
+    }
+
+    private Practice practice() {
+        UUID owner = UUID.randomUUID(), id = UUID.randomUUID();
+        db.update("INSERT INTO users(id,identity_issuer,identity_subject) VALUES (?,'practice-test',?)", owner, owner.toString());
+        db.update("INSERT INTO trading_accounts(id,user_id,mode,trading_enabled) VALUES (?,?,'DEMO',true)", id, owner);
+        return new Practice(owner, id, new PracticeOptions(db, tx, bookClock(), true, 200));
+    }
+
+    private PracticeOptions.Listing listed(Practice session, Kind kind) {
+        return session.options.view(session.owner, session.account, 0).chain().stream()
+            .filter(listing -> listing.kind() == kind && listing.strikePaise() == 100_000).findFirst().orElseThrow();
+    }
+
+    private Clock bookClock() {
+        return new Clock() {
+            @Override public ZoneId getZone() { return ZoneOffset.UTC; }
+            @Override public Clock withZone(ZoneId zone) { return Clock.fixed(now, zone); }
+            @Override public Instant instant() { return now; }
+        };
     }
 
     private Contract contract(Kind kind, Settlement settlement) {

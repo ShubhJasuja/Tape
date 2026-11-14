@@ -1,0 +1,41 @@
+.options-workspace { padding-bottom: 24px; }
+.options-heading h1 { font-size: 25px; }
+.options-index { display: grid; text-align: right; white-space: nowrap; gap: 3px; }
+.options-index strong { font-size: 22px; font-weight: 400; }
+.options-balances { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); margin-bottom: 16px; }
+.options-balances > div { padding: 12px 16px; }
+.options-balances > div + div { border-left: 1px solid var(--line); }
+.options-balances dt, .options-caption { color: var(--muted); font-size: 12px; }
+.options-balances dd { margin-top: 4px; font-size: clamp(13px, 1.5vw, 20px); overflow-wrap: anywhere; }
+.options-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(245px, 310px); grid-template-rows: min-content 1fr; gap: 16px; align-items: start; }
+.options-order-panel { grid-column: 2; grid-row: 1 / 3; }
+.options-position-panel { grid-column: 1; grid-row: 2; }
+.options-wide { grid-column: 1 / -1; }
+.options-panel-heading { justify-content: space-between; }
+.options-panel-heading select { background: var(--bg); padding: 5px; border: 1px solid var(--line); }
+.options-workspace table { width: 100%; border-collapse: collapse; }
+.options-workspace th, .options-workspace td { text-align: right; padding: 8px 12px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+.options-workspace thead th { font-size: 12px; font-weight: 500; color: var(--muted); }
+.options-scroll th:first-child { text-align: left; }
+.options-scroll { overflow: auto; }
+.options-chain th, .options-chain td { width: 33.33%; text-align: center; }
+.options-chain button { font: inherit; padding: 5px 4px; color: inherit; background: transparent; border: 0; border-bottom: 1px solid transparent; border-radius: 0; }
+.options-chain button:hover, .options-chain button[aria-pressed='true'] { border-bottom-color: var(--blue); }
+.options-empty, .options-paging, .options-panel-heading + .options-caption, .options-chain + .options-caption { padding: 12px 16px; }
+.options-ticket { padding: 12px 16px; }
+.options-ticket fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
+.options-side { margin: 8px 0 12px; border-bottom: 1px solid var(--line); }
+.options-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.options-paging { display: flex; justify-content: flex-end; gap: 8px; }
+.options-ticket button.primary { margin-top: 5px; }
+.options-sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+@media (max-width: 720px) {
+  .options-grid { grid-template-columns: minmax(0, 1fr); grid-template-rows: none; }
+  .options-order-panel, .options-position-panel { grid-column: auto; grid-row: auto; }
+  .options-balances { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .options-balances > div { border-bottom: 1px solid var(--line); }
+  .options-balances > div:nth-child(odd) { border-left: 0; }
+  .options-heading { align-items: start; }
+  .options-index strong { font-size: 16px; }
+  .account-top .tabs { flex-wrap: wrap; row-gap: 0; }
+}
