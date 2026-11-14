@@ -1,6 +1,6 @@
 # Indian equity catalog
 
-Tape stores instrument metadata in PostgreSQL. The authenticated Demo market watch searches the catalog by listing symbol, company name, or ISIN, with NSE/BSE and equity/SME filters. The 96 bundled discovery listings are fictional. Their FICT symbols and ZZ sample identifiers do not represent exchange listings. The nine existing instruments retain their synthetic pricing models. All charts in the authenticated terminal are synthetic candles. Historical exchange prices are unavailable.
+Tape stores instrument metadata in PostgreSQL. The authenticated Demo market watch searches the catalog by listing symbol, company name, or ISIN, with NSE/BSE and equity/SME filters. The 96 bundled discovery listings are fictional. Their FICT symbols and ZZ sample identifiers do not represent exchange listings. The nine existing instruments retain their synthetic pricing models. Demo charts use synthetic candles. The separate [Market data workspace](market-data.md) requires explicit permission for provider history.
 
 ## Sources and permission
 
@@ -8,7 +8,7 @@ Tape stores instrument metadata in PostgreSQL. The authenticated Demo market wat
 
 ## Identity and execution
 
-Flyway V5 adds source identity, optional ISIN and tick size, classification, listing status, synchronization timestamp and fictional/price capability fields. The nine mapped listings keep their internal UUIDs and receive separate stable synthetic keys. All existing foreign keys from orders, executions, positions and watchlists stay valid. Order requests retain the originally submitted symbol for idempotent retries, even if the displayed symbol changes. Market and resting execution require an active, explicitly mapped synthetic listing. Inactive mapped instruments keep their synthetic valuation for existing holdings, but cannot accept or match orders. Existing open orders stay reserved and can be cancelled. External provider integrations and the loopback H2 terminal retain their original curated lists.
+Flyway V5 adds source identity, optional ISIN and tick size, classification, listing status, synchronization timestamp and fictional/price capability fields. The nine mapped listings keep their internal UUIDs and receive separate stable synthetic keys. All existing foreign keys from orders, executions, positions and watchlists stay valid. Order requests retain the originally submitted symbol for idempotent retries, even if the displayed symbol changes. Market and resting execution require an active, explicitly mapped synthetic listing. Inactive mapped instruments keep their synthetic valuation for existing holdings, but cannot accept or match orders. Existing open orders stay reserved and can be cancelled. The loopback H2 terminal retains its curated list for Demo.
 
 The prior nine-instrument assumption covered legacy quote batches, candle and research lookup, legacy order validation, the authenticated market response and watchlist, PostgreSQL order validation, matching, portfolio marking, the React market selector, and matcher quote-health sampling. Legacy paths and synthetic-feed health remain tied to the nine configured price models by design. Discovery is independent of those models.
 

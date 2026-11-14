@@ -1,0 +1,36 @@
+
+{
+  "search": {
+    "status": "success",
+    "data": [
+      {"segment":"NSE_FO","exchange":"NSE","instrument_key":"NSE_FO|901","trading_symbol":"[redacted] 100 CE","name":"[redacted]","expiry":"2026-12-01","instrument_type":"CE","underlying_key":"NSE_EQ|ZZ0000000002","underlying_type":"EQUITY","strike_price":100,"lot_size":25,"tick_size":5},
+      {"segment":"NSE_FO","exchange":"NSE","instrument_key":"NSE_FO|903","trading_symbol":"[redacted] 100 PE","expiry":"2025-01-01","instrument_type":"PE","underlying_key":"NSE_EQ|ZZ0000000002","strike_price":100,"lot_size":25},
+      {"segment":"NSE_FO","exchange":"BSE","instrument_key":"NSE_FO|904","trading_symbol":"[redacted] FUT","expiry":"2026-12-01","instrument_type":"FUT","lot_size":25},
+      {"segment":"NSE_FO","exchange":"NSE","instrument_key":"NSE_FO|905","trading_symbol":"[redacted] FUT","expiry":"2026-12-01","instrument_type":"FUT","underlying_type":"INDEX","underlying_key":"NSE_INDEX|Redacted Index","lot_size":25}
+    ],
+    "meta_data":{"page":{"page_number":1,"total_pages":2}}
+  },
+  "quote": {
+    "status":"success",
+    "data":{"BSE_EQ:[redacted]":{"instrument_token":"BSE_EQ|ZZ0000000002","last_price":150},
+      "NSE_EQ:[redacted]":{"instrument_token":"NSE_EQ|ZZ0000000002","last_price":100,"net_change":5,
+        "volume":0,"last_trade_time":"1794640920000","ohlc":{"open":99,"high":101,"low":98,"close":100}}}
+  },
+  "history":{
+    "status":"success","data":{"candles":[
+      ["2026-11-13T09:15:00+05:30",101,102,100,101,null],
+      ["2026-11-12T09:15:00+05:30",100,102,99,101,0],
+      ["2026-11-11T09:15:00+05:30",100,99,98,101,10],
+      ["2026-11-12T09:15:00+05:30",100,102,99,101,0],
+      ["2026-11-16T09:15:00+05:30",100,102,99,101,10],
+      ["bad date",100,102,99,101,10]
+    ]}
+  },
+  "chain":{
+    "status":"success","data":[
+      {"expiry":"2026-12-01","strike_price":120,"underlying_key":"NSE_EQ|ZZ0000000002","put_options":{"instrument_key":"NSE_FO|902","market_data":{"ltp":3,"ask_price":4}}},
+      {"expiry":"2026-12-01","strike_price":100,"underlying_key":"NSE_EQ|ZZ0000000002","call_options":{"instrument_key":"NSE_FO|901","market_data":{"ltp":1.6,"oi":900,"volume":0,"bid_price":1.5}}},
+      {"expiry":"2026-12-02","strike_price":140,"underlying_key":"NSE_EQ|ZZ0000000002"}
+    ]
+  }
+}

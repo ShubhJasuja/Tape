@@ -23,6 +23,7 @@ import java.net.http.*;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Map;
+import java.util.List;
 import java.util.TimeZone;
 import java.util.UUID;
 
@@ -225,10 +226,62 @@ class AccountSecurityTest {
     }
 
     @Test
+    void providerMarketDataRequiresAuthenticationAndExplicitLocalEntitlement() throws Exception {
+        var anonymous = new Browser(local);
+        var alice = registered(email());
+        String routes = API + "/market-data";
+        assertEquals(401, anonymous.get(routes + "/status").statusCode());
+        assertEquals("DISCONNECTED", JSON.readTree(alice.get(routes + "/status").body()).path("status").asText());
+        assertEquals(403, alice.get(routes + "/quote?key=NSE_EQ%7CZZ0000000002").statusCode());
+        assertEquals(403, alice.get(routes + "/stream?key=NSE_EQ%7CZZ0000000002").statusCode());
+        assertEquals(403, alice.get(routes + "/instrument?key=NSE_EQ%7CZZ0000000002").statusCode());
+        assertEquals(403, alice.write("POST", routes + "/orders", "{}", "application/json", true).statusCode());
+
+        String ownerEmail = email();
+        var entitled = registered(ownerEmail);
+        UUID ownerId = owner.queryForObject("SELECT user_id FROM local_credentials WHERE email=?", UUID.class, ownerEmail);
+        new ResourceDatabasePopulator(new FileSystemResource("docs/market-data-runtime-grants.sql")).execute(owner.getDataSource());
+        try (var market = startApplication(true, false, false, Map.of("TAPE_MARKET_OWNER_ID", ownerId.toString(),
+            "TAPE_MARKET_PERMISSION_REF", "test-gate", "TAPE_MARKET_PERMISSIONS", "WATCHLIST,QUOTES",
+            "UPSTOX_ANALYTICS_TOKEN", ""))) {
+            var client = new Browser(market);
+            assertEquals(204, client.login(ownerEmail, PASSWORD).statusCode());
+            assertEquals("TOKEN_REQUIRED", JSON.readTree(client.get(routes + "/status").body()).path("status").asText());
+            assertEquals(503, client.get(routes + "/quote?key=NSE_EQ%7CZZ0000000002").statusCode());
+            assertEquals(403, client.write("PUT", routes + "/watchlist", "{\"instrumentKey\":\"NSE_EQ|ZZ0000000002\"}",
+                "application/json", false).statusCode());
+            assertEquals(204, client.write("PUT", routes + "/watchlist", "{\"instrumentKey\":\"NSE_EQ|ZZ0000000002\"}",
+                "application/json", true).statusCode());
+            assertEquals(1, JSON.readTree(client.get(routes + "/watchlist").body()).size());
+            assertEquals(204, client.write("DELETE", routes + "/watchlist?key=NSE_EQ%7CZZ0000000002", "", null, true).statusCode());
+            assertTrue(JSON.readTree(client.get(routes + "/watchlist").body()).isEmpty());
+            var other = new Browser(market);
+            String otherEmail = email();
+            assertEquals(201, other.register(otherEmail).statusCode());
+            assertEquals(204, other.login(otherEmail, PASSWORD).statusCode());
+            assertEquals(403, other.get(routes + "/watchlist").statusCode());
+        }
+
+        var catalog = local.getBean(ProviderCatalog.class);
+        String key = "NSE_EQ|ZZ0000000002";
+        var initial = new MarketDataProvider.Instrument("UPSTOX", key, "NSE", "NSE_EQ", "FIRST", "[redacted]",
+            "ZZ0000000002", MarketDataProvider.Segment.EQUITY, "UNKNOWN", null, null, null, null, null, 1L, null);
+        var renamed = new MarketDataProvider.Instrument("UPSTOX", key, "NSE", "NSE_EQ", "RENAMED", "[redacted]",
+            "ZZ0000000002", MarketDataProvider.Segment.EQUITY, "SUSPENDED", null, null, null, null, null, 1L, null);
+        owner.execute("GRANT SELECT, INSERT, UPDATE (instrument, synchronized_at) ON market_instrument_cache TO tape_runtime");
+        catalog.synchronize(ownerId, "UPSTOX", List.of(initial));
+        UUID id = owner.queryForObject("SELECT id FROM market_instrument_cache WHERE user_id=?", UUID.class, ownerId);
+        catalog.synchronize(ownerId, "UPSTOX", List.of(renamed));
+        assertEquals(id, owner.queryForObject("SELECT id FROM market_instrument_cache WHERE user_id=?", UUID.class, ownerId));
+        assertEquals("RENAMED", catalog.instrument(ownerId, "UPSTOX", key).symbol());
+        assertThrows(MarketDataAccess.Rejected.class, () -> catalog.instrument(UUID.randomUUID(), "UPSTOX", key));
+    }
+
+    @Test
     void legacyTerminalStillServesDemoStateOnlyOnLoopback() throws Exception {
         var settings = Map.<String, Object>of("server.port", 0, "server.address", "0.0.0.0",
             "spring.datasource.url", "jdbc:h2:mem:legacy-security-regression",
-            "UPSTOX_ANALYTICS_TOKEN", "", "OLLAMA_MODEL", "");
+            "UPSTOX_ANALYTICS_TOKEN", "fixture-credential", "OLLAMA_MODEL", "");
         try (var app = new SpringApplicationBuilder(Tape.class).profiles("h2-legacy")
             .initializers(context -> context.getEnvironment().getPropertySources()
                 .addFirst(new MapPropertySource("legacy-security-test", settings))).run()) {
@@ -242,6 +295,10 @@ class AccountSecurityTest {
             assertEquals(100_000_000, JSON.readTree(response.body()).path("account").path("cash").asLong());
             assertEquals(200, client.get("/api/candles?mode=demo&symbol=NSE%3ATCS").statusCode());
             assertEquals(200, client.get("/api/research?mode=demo&symbol=NSE%3ATCS").statusCode());
+            var legacyLive = JSON.readTree(client.get("/api/terminal?mode=live").body());
+            assertFalse(legacyLive.path("liveConfigured").asBoolean());
+            assertTrue(legacyLive.path("feed").path("quotes").isEmpty());
+            assertEquals(403, client.write("POST", "/api/orders?mode=live", "{}", "application/json", false).statusCode());
         }
     }
 

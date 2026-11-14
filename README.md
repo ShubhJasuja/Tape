@@ -20,15 +20,13 @@ Use `./mvnw` instead of `./mvnw.cmd` on Linux or macOS. Open [the terminal](http
 
 The optional PostgreSQL workspace supports registration, sign-in, sign-out, and separate funded virtual accounts per user. Enable account-scoped synthetic Demo trading with the [trading setup](docs/trading.md#enable-a-local-demo-workspace). Live-data execution remains disabled. The default loopback H2 terminal retains the existing simulator, charts, research and order flows. See the [authentication guide](docs/authentication.md) for profile setup and API contracts.
 
-## Live NSE and BSE data
+## Read-only NSE and BSE data
 
-Generate a free read-only [Upstox Analytics Token](https://upstox.com/developer/api-documentation/analytics-token/) in your Upstox Developer Apps account. Set it in your local environment as `UPSTOX_ANALYTICS_TOKEN` before starting Spring Boot. Restart the backend and select **Live data**. Keep the token out of Git, browser code, and screenshots.
-
-Tape requests one batched [quote snapshot](https://upstox.com/developer/api-documentation/get-full-market-quote-v3/) every five seconds and uses the [historical candle API](https://upstox.com/developer/api-documentation/v3/get-historical-candle-data/) for charts and stock research. A curated list covers NSE stocks and selected BSE listings. During regular weekday trading hours in India, an eligible quote must be from a trade in the last 60 seconds and the feed must be connected. Holidays and special sessions rely on the quote guard and regular-hours rule. The last known prices can still be viewed when the feed stops. Live and demo orders and balances use separate ledgers.
+The authenticated **Market data** workspace is disconnected by default. Once your permitted use is documented, follow the [market-data setup](docs/market-data.md) to configure the local owner and server-side Upstox Analytics Token. The old H2 live ledger remains available for review and cancellation.
 
 ## Research and local AI
 
-**Analyze a stock** computes 20-session return, daily realized volatility, and maximum drawdown from daily closes. **Analyze portfolio** reports position and sector concentration, cash allocation, and return since inception. Portfolio analysis in live mode requires fresh marks on every position.
+**Analyze a stock** computes 20-session return, daily realized volatility, and maximum drawdown from daily synthetic closes. **Analyze portfolio** reports position and sector concentration, cash allocation, and return since inception in the legacy Demo terminal.
 
 The default report is calculated by Java. To enable optional AI prioritization, install and run [Ollama](https://docs.ollama.com/), pull a local model such as `llama3.2:1b`, set `OLLAMA_MODEL=llama3.2:1b` in the backend environment, and restart. The backend sends the calculated metrics to localhost and accepts exactly one known observation ID. The browser displays only predefined labels, values, and explanations. This keeps recommendations, forecasts, and invented numbers out of the output. Failed or unavailable model calls fall back to the calculated report. Model inference runs on your machine with no paid API.
 
@@ -62,4 +60,4 @@ When started from the project root with the default configuration, the database 
 
 See the [database guide](docs/database.md) for the Stage 2A PostgreSQL profile, migrations and tests, and [ADR 0001](docs/adr/0001-account-storage-and-ledger.md) for the multi-user design.
 
-**Resume bullet:** Built an Indian-equity paper trading terminal with React and Spring Boot, a persistent virtual order ledger, live quote integration, and local AI prioritization of verified stock and portfolio metrics.
+**Resume bullet:** Built an Indian-equity paper trading terminal with React, Spring Boot, and PostgreSQL, with an isolated virtual order ledger, a permission-gated market-data adapter tested against fixtures, and local AI summaries of computed research metrics.

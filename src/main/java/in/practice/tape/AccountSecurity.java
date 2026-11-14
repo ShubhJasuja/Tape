@@ -73,6 +73,12 @@ class AccountSecurity {
                     "/api/v1/accounts/*/market", "/api/v1/accounts/*/candles",
                     "/api/v1/accounts/*/instruments", "/api/v1/accounts/*/instruments/*").authenticated()
                 .requestMatchers(HttpMethod.POST, "/api/v1/accounts/*/orders").authenticated()
+                .requestMatchers(HttpMethod.GET, "/api/v1/market-data/status", "/api/v1/market-data/instruments", "/api/v1/market-data/instrument",
+                    "/api/v1/market-data/indices", "/api/v1/market-data/futures", "/api/v1/market-data/options",
+                    "/api/v1/market-data/option-chain", "/api/v1/market-data/quote", "/api/v1/market-data/exchange-status",
+                    "/api/v1/market-data/candles", "/api/v1/market-data/stream", "/api/v1/market-data/watchlist").authenticated()
+                .requestMatchers(HttpMethod.PUT, "/api/v1/market-data/watchlist").authenticated()
+                .requestMatchers(HttpMethod.DELETE, "/api/v1/market-data/watchlist").authenticated()
                 .requestMatchers(HttpMethod.DELETE, "/api/v1/accounts/*/orders/*").authenticated()
                 .requestMatchers(HttpMethod.PUT, "/api/v1/accounts/*/watchlist").authenticated()
                 .anyRequest().denyAll())

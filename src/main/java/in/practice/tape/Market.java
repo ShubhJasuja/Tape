@@ -1,21 +1,11 @@
 package in.practice.tape;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
-import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.web.server.ResponseStatusException;
 
-import java.net.URI;
-import java.net.URLEncoder;
-import java.net.http.*;
-import java.nio.charset.StandardCharsets;
 import java.time.*;
 import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.stream.Collectors;
 
 @Service
 class Market {
@@ -37,32 +27,10 @@ class Market {
     record Candle(String date, long open, long high, long low, long close, long volume) {}
     record Snapshot(String mode, String status, Map<String, Quote> quotes) {
         Quote tradeable(String symbol, long now) {
-            Quote q = quotes.get(symbol);
-            if ("demo".equals(mode)) return q;
-            ZonedDateTime ist = Instant.ofEpochMilli(now).atZone(INDIA);
-            boolean regularHours = ist.getDayOfWeek().getValue() <= 5 &&
-                !ist.toLocalTime().isBefore(LocalTime.of(9, 15)) &&
-                ist.toLocalTime().isBefore(LocalTime.of(15, 30));
-            return "Connected".equals(status) && regularHours && q != null &&
-                q.time() <= now + 5000 && q.time() >= now - 60_000 ? q : null;
+            return "demo".equals(mode) ? quotes.get(symbol) : null;
         }
     }
-    record CachedHistory(Instant fetched, List<Candle> candles) {}
-
-    private final HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(4)).build();
-    private final ObjectMapper json;
-    private final String token;
-    private final Map<String, CachedHistory> history = new ConcurrentHashMap<>();
-    private volatile Snapshot live;
     private final long started = System.currentTimeMillis();
-
-    Market(ObjectMapper json, @Value("${UPSTOX_ANALYTICS_TOKEN:}") String token) {
-        this.json = json;
-        this.token = token.strip();
-        live = new Snapshot("live", enabled() ? "Connecting" : "Token required", Map.of());
-    }
-
-    boolean enabled() { return !token.isBlank(); }
 
     static Instrument instrument(String symbol) {
         return INSTRUMENTS.stream().filter(i -> i.symbol().equals(symbol)).findFirst()
@@ -70,7 +38,7 @@ class Market {
     }
 
     Snapshot snapshot(String mode) {
-        if ("live".equals(mode)) return live;
+        if ("live".equals(mode)) return new Snapshot("live", "Disconnected", Map.of());
         if (!"demo".equals(mode)) throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Unknown data mode.");
         long now = System.currentTimeMillis();
         Map<String, Quote> quotes = new LinkedHashMap<>();
@@ -81,31 +49,6 @@ class Market {
             quotes.put(i.symbol(), new Quote(price, price - lastClose, now));
         }
         return new Snapshot("demo", "Synthetic demo", Map.copyOf(quotes));
-    }
-
-    @Scheduled(fixedDelay = 5000)
-    void refresh() {
-        if (!enabled()) return;
-        try {
-            String keys = INSTRUMENTS.stream().map(Instrument::key).collect(Collectors.joining(","));
-            Map<String, Quote> byKey = new HashMap<>();
-            for (JsonNode row : get("/v3/market-quote/quotes?instrument_key=" + encode(keys)).path("data")) {
-                long price = money(row.path("last_price"));
-                long time = row.path("last_trade_time").asLong();
-                if (price > 0 && price <= 100_000_000 && time > 0) {
-                    byKey.put(row.path("instrument_token").asText(), new Quote(price, money(row.path("net_change")), time));
-                }
-            }
-            Map<String, Quote> quotes = new HashMap<>(live.quotes());
-            for (var i : INSTRUMENTS) {
-                if (byKey.containsKey(i.key())) quotes.put(i.symbol(), byKey.get(i.key()));
-            }
-            live = new Snapshot("live", byKey.isEmpty() ? "Feed unavailable" : "Connected", Map.copyOf(quotes));
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        } catch (Exception e) {
-            live = new Snapshot("live", "Feed unavailable", live.quotes());
-        }
     }
 
     List<Candle> candles(String mode, Instrument i) {
@@ -124,39 +67,7 @@ class Market {
             return candles.reversed();
         }
         snapshot(mode);
-        if (!enabled()) return List.of();
-        var cached = history.compute(i.symbol(), (symbol, prior) -> {
-            Instant now = Instant.now();
-            if (prior != null && prior.fetched().plusSeconds(300).isAfter(now)) return prior;
-            try {
-                LocalDate to = LocalDate.now(INDIA).minusDays(1);
-                List<Candle> result = new ArrayList<>();
-                for (JsonNode row : get("/v3/historical-candle/" + encode(i.key()) + "/days/1/" +
-                    to + "/" + to.minusDays(135)).path("data").path("candles")) {
-                    if (row.size() >= 6 && row.get(0).asText().length() >= 10 && money(row.get(4)) > 0) {
-                        result.add(new Candle(row.get(0).asText().substring(0, 10), money(row.get(1)),
-                            money(row.get(2)), money(row.get(3)), money(row.get(4)), row.get(5).asLong()));
-                    }
-                }
-                result.sort(Comparator.comparing(Candle::date));
-                return new CachedHistory(now, List.copyOf(result));
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            } catch (Exception ignored) {
-                // The chart can still show a previously retrieved series.
-            }
-            return new CachedHistory(now.minusSeconds(285), prior == null ? List.of() : prior.candles());
-        });
-        return cached.candles();
-    }
-
-    private JsonNode get(String path) throws Exception {
-        var request = HttpRequest.newBuilder(URI.create("https://api.upstox.com" + path))
-            .header("Authorization", "Bearer " + token).header("Accept", "application/json")
-            .timeout(Duration.ofSeconds(6)).GET().build();
-        var response = http.send(request, HttpResponse.BodyHandlers.ofString());
-        if (response.statusCode() != 200) throw new IllegalStateException("Market data request failed.");
-        return json.readTree(response.body());
+        return List.of();
     }
 
     static long demoClose(Instrument i, int n) {
@@ -165,6 +76,4 @@ class Market {
             Math.sin(n * 1.31 + phase) * 0.008));
     }
 
-    private static long money(JsonNode value) { return Math.round(value.asDouble() * 100); }
-    private static String encode(String value) { return URLEncoder.encode(value, StandardCharsets.UTF_8); }
 }

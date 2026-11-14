@@ -414,6 +414,25 @@ class PaperTradingTest {
     }
 
     @Test
+    void aProviderPriceForTheSameSymbolDoesNotReachTheSyntheticLedger() {
+        var identity = account();
+        var before = first.wallet(identity.owner, identity.account);
+        String payload = """
+            {"status":"success","data":{"redacted":{"instrument_token":"NSE_EQ|INE002A01018","last_price":9.99}}}
+            """;
+        try (var provider = new UpstoxMarketData(JSON, java.time.Clock.systemUTC(), true, path ->
+            new UpstoxMarketData.Response(200, "", payload.getBytes(java.nio.charset.StandardCharsets.UTF_8)))) {
+            assertEquals(new BigDecimal("9.99"), provider.quote("NSE_EQ|INE002A01018").last());
+            assertEquals(before, first.wallet(identity.owner, identity.account));
+            assertEquals(0, executions(identity));
+            var fill = submit(first, identity, ticket("BUY", "MARKET", 1, null));
+            assertEquals(10_000, fill.fillPaise());
+            assertEquals(SyntheticQuotes.SOURCE, fill.quoteSource());
+            assertEquals(1, executions(identity));
+        }
+    }
+
+    @Test
     void catalogSearchPagesFiltersAndKeepsMetadataOnlyWatchlistsPrivate() throws Exception {
         var alice = client();
         var bob = client();

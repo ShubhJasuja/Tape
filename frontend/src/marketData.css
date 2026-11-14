@@ -1,0 +1,28 @@
+
+.market-workspace { padding-bottom: 28px; }
+.market-heading { margin-bottom: 14px; }
+.market-data-grid { grid-template-columns: minmax(200px, 260px) minmax(0, 1fr); }
+.market-data-grid .stock { text-align: left; }
+.market-data-grid .stock > span { text-align: left; }
+.market-data-grid .stock[aria-pressed="true"] strong { border-bottom: 1px solid var(--blue); }
+.market-data-grid .stock strong { overflow-wrap: anywhere; }
+.market-data-grid .chart { min-width: 0; }
+.market-data-grid .chart-title h2 { overflow-wrap: anywhere; }
+.provider-stamp { padding: 8px 14px; font-size: 12px; overflow-wrap: anywhere; }
+.provider-ohlc { display: flex; flex-wrap: wrap; gap: 10px 18px; padding: 8px 14px; }
+.provider-ohlc dt { color: var(--muted); }
+.provider-ohlc dd { margin: 2px 0 0; font-variant-numeric: tabular-nums; }
+.provider-pins { padding: 10px; display: grid; gap: 5px; }
+.provider-pins > div { display: flex; justify-content: space-between; gap: 4px; }
+.provider-pins div > button:first-child { overflow-wrap: anywhere; text-align: left; }
+.provider-chain { margin-top: 16px; }
+.contract-controls label { display: grid; gap: 4px; }
+.contract-controls input { background: var(--control); border: 1px solid var(--line); padding: 4px 7px; width: 120px; }
+.provider-table { overflow: auto; max-height: 360px; }
+.provider-table th, .provider-table td { text-align: right; font-variant-numeric: tabular-nums; }
+.provider-table thead th[colspan] { text-align: center; }
+.provider-table tbody th { color: var(--ink); }
+@media (max-width: 800px) {
+  .market-data-grid { grid-template-columns: minmax(0, 1fr); }
+  .market-data-grid .chart { grid-column: 1; grid-row: 2; }
+}

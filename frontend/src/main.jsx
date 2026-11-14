@@ -18,6 +18,7 @@ const exchange = s => s.split(':')[0];
 const ist = new Intl.DateTimeFormat('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
 const dates = new Intl.DateTimeFormat('en-IN', { day: 'numeric', month: 'short', timeZone: 'UTC' });
 const day = s => dates.format(new Date(s + 'T00:00:00Z'));
+const exchangeDay = new Intl.DateTimeFormat('en-IN', { day: 'numeric', month: 'short', timeZone: 'Asia/Kolkata' });
 const query = params => new URLSearchParams(params);
 const tone = n => n > 0 ? 'up' : n < 0 ? 'down' : '';
 async function api(path, options) {
@@ -30,10 +31,11 @@ async function api(path, options) {
   return raw ? JSON.parse(raw) : null;
 }
 
-function Chart({ candles, symbol }) {
+function Chart({ candles, symbol, interval = 'DAILY' }) {
   const canvas = useRef(null);
   const [hover, setHover] = useState(null);
   const hovered = candles[hover] || candles.at(-1);
+  const barTime = row => row.exchangeAt ? (interval === 'DAILY' ? exchangeDay : ist).format(new Date(row.exchangeAt)) : day(row.date);
   useEffect(() => {
     setHover(null);
   }, [candles, symbol]);
@@ -73,8 +75,10 @@ function Chart({ candles, symbol }) {
         ctx.fillRect(x - .5, y(c.high), 1, Math.max(1, y(c.low) - y(c.high)));
         ctx.fillRect(x - width / 2, y(Math.max(c.open, c.close)), width, Math.max(1, Math.abs(y(c.open) - y(c.close))));
         ctx.globalAlpha = .27;
-        const volume = c.volume / maxVolume * 34;
-        ctx.fillRect(x - width / 2, bottom - volume, width, volume);
+        if (c.volume != null) {
+          const volume = c.volume / maxVolume * 34;
+          ctx.fillRect(x - width / 2, bottom - volume, width, volume);
+        }
         ctx.globalAlpha = 1;
       });
       const ticks = w < 420 ? 3 : 5;
@@ -83,7 +87,7 @@ function Chart({ candles, symbol }) {
       for (let n = 0; n < ticks; n++) {
         const index = Math.round((candles.length - 1) * n / (ticks - 1));
         const x = Math.max(23, Math.min(right - 12, left + step * (index + .5)));
-        ctx.fillText(day(candles[index].date), x, h - 12);
+        ctx.fillText(barTime(candles[index]), x, h - 12);
       }
       if (hover != null && candles[hover]) {
         const x = left + step * (hover + .5);
@@ -95,11 +99,11 @@ function Chart({ candles, symbol }) {
     observer.observe(el);
     document.fonts.ready.then(paint);
     return () => observer.disconnect();
-  }, [candles, hover]);
+  }, [candles, hover, interval]);
   return <>
-    <div className="ohlc mono">{hovered ? <><span>{day(hovered.date)}</span>{[['O', 'open'], ['H', 'high'], ['L', 'low'], ['C', 'close']].map(([label, key]) =>
+    <div className="ohlc mono">{hovered ? <><span>{barTime(hovered)}</span>{[['O', 'open'], ['H', 'high'], ['L', 'low'], ['C', 'close']].map(([label, key]) =>
       <span key={key}>{label} <b>{price(hovered[key])}</b></span>)}</> : 'Daily OHLC'}</div>
-    {candles.length ? <canvas ref={canvas} role="img" aria-label={ticker(symbol) + ' daily candlestick and volume chart'}
+    {candles.length ? <canvas ref={canvas} role="img" aria-label={ticker(symbol) + ' candlestick and volume chart'}
       onPointerMove={e => {
         const rect = e.currentTarget.getBoundingClientRect();
         const index = Math.floor((e.clientX - rect.left - 9) / (rect.width - 87) * candles.length);
@@ -332,7 +336,7 @@ function App({ demoAccount, sessionExpired }) {
         <div className="feed"><span className={'dot ' + (tradeable ? 'ready' : '')}/>{active?.feed.status || 'Connecting'}{quote && <span className="muted mono"> · {ist.format(quote.time)} IST</span>}</div>
       </div>
       {error && <div className="notice" role="alert">{error}</div>}
-      {mode === 'live' && active && !active.liveConfigured && <div className="notice"><CircleHelp size={16}/> Set UPSTOX_ANALYTICS_TOKEN on the Spring Boot server to connect live data.</div>}
+      {mode === 'live' && active && !active.liveConfigured && <div className="notice"><CircleHelp size={16}/> The legacy live-data ledger is available for review and cancellation. Provider data is in the authenticated Market data workspace.</div>}
       <div className="terminal-grid">
         <section className="panel markets" aria-label="Market watch">
           <div className="panel-title"><Layers3 size={16}/> <h2>Market watch</h2></div>
@@ -383,7 +387,7 @@ function App({ demoAccount, sessionExpired }) {
             {[['30D',30], ['60D',60], ['90D',90]].map(([label,n]) => <button key={n} title={n + " trading sessions"} className={range === n ? 'selected' : ''} aria-pressed={range === n} onClick={() => setRange(n)}>{label}</button>)}
           </div></div>
           {metadataOnly ? <div className="empty-chart">Price data unavailable for this listing.</div> : <Chart candles={candles} symbol={symbol}/>}
-          <div className="chart-footer"><span><i/> Volume</span><span>{metadataOnly ? 'Metadata only · Historical prices unavailable' : mode === 'demo' ? 'Synthetic candles' : tradeable ? 'Upstox' : 'Upstox · Last available'} · INR</span></div>
+          <div className="chart-footer"><span><i/> Volume</span><span>{metadataOnly ? 'Metadata only · Historical prices unavailable' : mode === 'demo' ? 'Synthetic candles' : 'Provider data disconnected'} · INR</span></div>
         </section>
 
         <section className="panel ticket" aria-label="Order ticket">
@@ -445,4 +449,4 @@ function App({ demoAccount, sessionExpired }) {
     </main>
   </>;
 }
-createRoot(document.getElementById('root')).render(<TapeEntry Terminal={App} />);
+createRoot(document.getElementById('root')).render(<TapeEntry Terminal={App} Chart={Chart} />);

@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { Activity } from 'lucide-react';
 import './accounts.css';
+import MarketData from './marketData.jsx';
 
 const api = '/api/v1';
 const amount = new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR' });
@@ -18,7 +19,7 @@ async function post(path, body, contentType) {
   return request(path, { method: 'POST', headers, body });
 }
 
-export default function TapeEntry({ Terminal }) {
+export default function TapeEntry({ Terminal, Chart }) {
   const [phase, setPhase] = useState('loading');
   const [user, setUser] = useState(null);
   const [error, setError] = useState('');
@@ -50,10 +51,11 @@ export default function TapeEntry({ Terminal }) {
   if (phase === 'loading') return <main className="account-page"><p role="status">Connecting to Tape…</p></main>;
   if (phase === 'error') return <main className="account-page"><p role="alert">{error}</p>
     <button className="quiet" onClick={restore}>Try again</button></main>;
-  return <AccountWorkspace user={user} restore={restore} signOut={signOut} Terminal={Terminal} />;
+  return <AccountWorkspace user={user} restore={restore} signOut={signOut} Terminal={Terminal} Chart={Chart} />;
 }
 
-function AccountWorkspace({ user, restore, signOut, Terminal }) {
+function AccountWorkspace({ user, restore, signOut, Terminal, Chart }) {
+  const [workspace, setWorkspace] = useState('paper');
   const [registering, setRegistering] = useState(false);
   const [email, setEmail] = useState('');
   const [busy, setBusy] = useState(false);
@@ -135,14 +137,19 @@ function AccountWorkspace({ user, restore, signOut, Terminal }) {
   }
 
   const active = accounts?.find(account => account.id === selection);
+  const showMarket = !!user && workspace === 'market';
   return <>
     <header className="top account-top">
       <a className="brand" href="#workspace"><span className="brand-mark"><Activity size={23}/></span> Tape
         <span className="brand-sub">PAPER TRADING</span></a>
+      {user && <nav className="tabs" aria-label="Workspace">
+        <button className={!showMarket ? 'selected' : ''} aria-pressed={!showMarket} onClick={() => setWorkspace('paper')}>Paper accounts</button>
+        <button className={showMarket ? 'selected' : ''} aria-pressed={showMarket} onClick={() => setWorkspace('market')}>Market data</button>
+      </nav>}
       {user && <div className="account-session"><span>{user.email}</span>
         <button className="quiet" onClick={logout} disabled={busy}>Sign out</button></div>}
     </header>
-    <main id="workspace" className="account-page">
+    <main id="workspace" className="account-page" hidden={showMarket}>
       <section className="panel account-panel" aria-labelledby="account-title">
         <h1 id="account-title">{user ? 'Your paper accounts' : registering ? 'Create your account' : 'Sign in to Tape'}</h1>
         {error && <p className="notice" role="alert">{error}</p>}
@@ -180,6 +187,7 @@ function AccountWorkspace({ user, restore, signOut, Terminal }) {
         </>}
       </section>
     </main>
-    {active?.tradingEnabled && <Terminal key={active.id} demoAccount={active.id} sessionExpired={signOut} />}
+    {showMarket ? <MarketData signOut={signOut} Chart={Chart} /> :
+      active?.tradingEnabled && <Terminal key={active.id} demoAccount={active.id} sessionExpired={signOut} />}
   </>;
 }

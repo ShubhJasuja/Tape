@@ -1,9 +1,11 @@
 package in.practice.tape;
 
 import org.springframework.context.annotation.Profile;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.server.ResponseStatusException;
 
 import java.util.List;
 import java.util.Map;
@@ -32,7 +34,7 @@ class TerminalApi {
     Terminal terminal(@RequestParam(defaultValue = "demo") String mode) {
         var feed = market.snapshot(mode);
         long now = System.currentTimeMillis();
-        return new Terminal(Market.INSTRUMENTS, feed, market.enabled(), trading.account(feed),
+        return new Terminal(Market.INSTRUMENTS, feed, false, trading.account(feed),
             db.queryForList("SELECT symbol FROM watchlist ORDER BY symbol", String.class),
             Market.INSTRUMENTS.stream().map(Market.Instrument::symbol).filter(s -> feed.tradeable(s, now) != null).toList());
     }
@@ -44,6 +46,7 @@ class TerminalApi {
 
     @PostMapping(value = "/orders", consumes = MediaType.APPLICATION_JSON_VALUE)
     Trading.Order submit(@RequestParam String mode, @RequestBody Trading.Ticket ticket) {
+        if ("live".equals(mode)) throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Live-data trading is disabled.");
         return trading.submit(mode, ticket);
     }
 
