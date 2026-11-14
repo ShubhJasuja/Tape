@@ -106,6 +106,15 @@ class DerivativeBookTest {
     }
 
     @Test
+    void voluntaryShortCoverCannotCreateAnOptionsCashDeficit() {
+        var option = contract(Kind.CALL, Settlement.CASH);
+        fill(option, -10, 100);
+        var before = book.reconcile(user, account);
+        code("INSUFFICIENT_MARGIN", () -> fill(option, 10, 5500));
+        assertEquals(before, book.reconcile(user, account));
+    }
+
+    @Test
     void futuresMarkPostsVariationAndRebasesBothSidesAndPartialClose() {
         var future = contract(Kind.FUTURE, Settlement.CASH);
         assertEquals(0, fill(future, -20, 1000).cash());

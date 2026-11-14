@@ -133,9 +133,11 @@ final class DerivativeBook {
             long cash = future ? realized : premium;
             Wallet book = wallet(account);
             Wallet next = move(book, cash, 0, marginDelta);
-            // The configured collateral must be covered without counting proceeds from this new short.
+            if (!future && next.available() < 0) throw reject("INSUFFICIENT_MARGIN");
+            // New short collateral cannot be funded by the premium for the newly opened lots.
+            long openingShortPremium = !future && delta < 0 ? notional - closeValue : 0;
             if (opened > 0 && (next.available() < 0 || book.available() < 0 ||
-                premium > 0 && next.available() < premium)) throw reject("INSUFFICIENT_MARGIN");
+                next.available() < openingShortPremium)) throw reject("INSUFFICIENT_MARGIN");
             return apply(account, contractId, next, new Position(net, basis, collateral, spec.version()),
                 new Event(0, request, contractId, spec.version(), "FILL", price, null, delta,
                     basis - before.basis(), premium, cash, 0, marginDelta, realized, 0, 0, 0, at));
