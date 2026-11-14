@@ -49,8 +49,10 @@ final class MarketDataApi {
                                 @RequestParam(defaultValue = "") String exchange, @RequestParam(defaultValue = "EQUITY") Segment segment,
                                 @RequestParam(required = false) LocalDate expiry, @RequestParam(defaultValue = "1") int page) {
         access.require(user.userId(), Capability.CATALOG);
-        if (segment == Segment.OPTIONS || segment == Segment.FUTURES) access.require(user.userId(), Capability.DERIVATIVES);
+        if (segment == Segment.OPTIONS || segment == Segment.FUTURES) access.requirePermission(user.userId(), Capability.DERIVATIVES);
         if (page < 1 || page > 50 || query(q).isEmpty()) throw invalid();
+        if ((segment != Segment.EQUITY && "BSE".equals(exchange)) ||
+            (expiry != null && segment != Segment.OPTIONS && segment != Segment.FUTURES)) throw invalid();
         if (expiry != null) activeExpiry(expiry, today());
         return response(provider.search(query(q), exchangeFilter(exchange), segment, expiry, page));
     }
@@ -154,7 +156,7 @@ final class MarketDataApi {
     }
 
     private void checkDerivative(AccountDirectory.Principal user, String key) {
-        if (key(key).startsWith("NSE_FO|")) access.require(user.userId(), Capability.DERIVATIVES);
+        if (key(key).startsWith("NSE_FO|")) access.requirePermission(user.userId(), Capability.DERIVATIVES);
     }
 
     @ExceptionHandler(MarketDataAccess.Rejected.class)

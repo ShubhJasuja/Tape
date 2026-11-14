@@ -16,6 +16,10 @@
       "NSE_EQ:[redacted]":{"instrument_token":"NSE_EQ|ZZ0000000002","last_price":100,"net_change":5,
         "volume":0,"last_trade_time":"1794640920000","ohlc":{"open":99,"high":101,"low":98,"close":100}}}
   },
+  "indexQuote": {
+    "status":"success", "data":{"NSE_INDEX:Redacted Index":{"last_price":100, "prev_close_price":95,
+      "timestamp":"2026-11-14T15:29:58+05:30"}}
+  },
   "history":{
     "status":"success","data":{"candles":[
       ["2026-11-13T09:15:00+05:30",101,102,100,101,null],

@@ -43,7 +43,21 @@ class MarketDataProviderTest {
             return new UpstoxMarketData.Response(401, "", "private diagnostic".getBytes(StandardCharsets.UTF_8));
         })) {
             assertEquals("MARKET_AUTH_FAILED", code(() -> proxy.quote(KEY)));
+            assertEquals("MARKET_AUTH_FAILED", code(() -> proxy.quote(KEY)));
             assertEquals(1, calls.get());
+        }
+    }
+
+    @Test
+    void providerDenialDoesNotMarkTheCredentialExpired() {
+        var calls = new AtomicInteger();
+        try (var proxy = provider(fixedClock(), true, path -> {
+            calls.incrementAndGet();
+            return new UpstoxMarketData.Response(403, "", new byte[0]);
+        })) {
+            assertEquals("MARKET_PROVIDER_FORBIDDEN", code(() -> proxy.quote(KEY)));
+            assertEquals("MARKET_PROVIDER_FORBIDDEN", code(() -> proxy.quote(KEY)));
+            assertEquals(2, calls.get());
         }
     }
 
@@ -66,6 +80,24 @@ class MarketDataProviderTest {
     }
 
     @Test
+    void honorsHttpDateRetryAfter() {
+        var calls = new AtomicInteger();
+        var current = new AtomicReference<>(NOW);
+        try (var proxy = provider(changingClock(current), true, path -> {
+            calls.incrementAndGet();
+            return new UpstoxMarketData.Response(429, "Sat, 14 Nov 2026 10:02:00 GMT", new byte[0]);
+        })) {
+            assertEquals("MARKET_RATE_LIMITED", code(() -> proxy.quote(KEY)));
+            current.set(NOW.plusSeconds(90));
+            assertEquals("MARKET_RATE_LIMITED", code(() -> proxy.quote(KEY)));
+            assertEquals(1, calls.get());
+            current.set(NOW.plusSeconds(122));
+            assertEquals("MARKET_RATE_LIMITED", code(() -> proxy.quote(KEY)));
+            assertEquals(2, calls.get());
+        }
+    }
+
+    @Test
     void quotesResolveExactKeyAndMarkOldTradeStaleWithoutConvertingMissingFieldsToZero() throws Exception {
         try (var proxy = contract("quote", path -> assertTrue(path.matches(".*/quotes\\?instrument_key=[NB]SE_EQ%7CZZ0000000002")))) {
             var quote = proxy.quote(KEY);
@@ -81,6 +113,19 @@ class MarketDataProviderTest {
             assertNull(bse.exchangeAt());
             assertNull(bse.volume());
             assertEquals("UNKNOWN", bse.freshness());
+        }
+    }
+
+    @Test
+    void indexResponseKeyCanIdentifyAQuoteWithoutInventingTradeTime() throws Exception {
+        try (var proxy = contract("indexQuote", path -> assertTrue(path.endsWith("NSE_INDEX%7CRedacted%20Index")))) {
+            var quote = proxy.quote("NSE_INDEX|Redacted Index");
+            assertEquals(100, quote.last().intValueExact());
+            assertEquals(5, quote.change().intValueExact());
+            assertNull(quote.exchangeAt());
+            assertEquals(Instant.parse("2026-11-14T09:59:58Z"), quote.providerAt());
+            assertEquals(NOW, quote.receivedAt());
+            assertEquals("UNKNOWN", quote.freshness());
         }
     }
 
@@ -133,6 +178,10 @@ class MarketDataProviderTest {
         env.setActiveProfiles("accounts", "accounts-local");
         assertEquals("DISCONNECTED", new MarketDataAccess(env).status(owner));
         env.setProperty("TAPE_MARKET_PERMISSION_REF", "contract-test");
+        assertEquals("DISCONNECTED", new MarketDataAccess(env).status(owner));
+        env.setProperty("TAPE_MARKET_DISPLAY_DELAY", "30d");
+        assertEquals("MARKET_PERMISSION_REQUIRED", code(() -> new MarketDataAccess(env).require(owner, Capability.STREAM)));
+        env.setProperty("TAPE_MARKET_DISPLAY_DELAY", "NONE");
         var noToken = new MarketDataAccess(env);
         assertEquals("TOKEN_REQUIRED", noToken.status(owner));
         assertEquals("MARKET_TOKEN_REQUIRED", code(() -> noToken.require(owner, Capability.QUOTES)));
@@ -148,20 +197,17 @@ class MarketDataProviderTest {
     @Test
     void streamReconnectsWithFreshAuthorizationAndDoesNotRetainDisconnectedTick() throws Exception {
         var current = new AtomicReference<>(NOW);
-        var clock = new Clock() {
-            @Override public ZoneId getZone() { return ZoneOffset.UTC; }
-            @Override public Clock withZone(ZoneId zone) { return Clock.fixed(instant(), zone); }
-            @Override public Instant instant() { return current.get(); }
-        };
+        var clock = changingClock(current);
         var authorizations = new AtomicInteger();
         var established = new LinkedBlockingQueue<WebSocket.Listener>();
         var socket = mock(WebSocket.class);
-        when(socket.sendBinary(any(), anyBoolean())).thenReturn(CompletableFuture.completedFuture(socket));
+        var firstSend = new CompletableFuture<WebSocket>();
+        when(socket.sendBinary(any(), anyBoolean())).thenReturn(firstSend, CompletableFuture.completedFuture(socket));
         try (var provider = provider(clock, false, path -> { throw new AssertionError(); });
              var stream = new UpstoxQuoteStream(JSON, clock, () -> {
                  authorizations.incrementAndGet();
                  return URI.create("wss://fixture.upstox.com/fixture");
-             }, (key, at, received, status, last, change) -> provider.quote(key, at, received, status, last, change,
+             }, (key, at, received, status, last, change) -> provider.quote(key, at, null, received, status, last, change,
                   null, null, null, null, null), (uri, listener) -> {
                  listener.onOpen(socket);
                  established.add(listener);
@@ -175,6 +221,7 @@ class MarketDataProviderTest {
             first.onBinary(socket, ByteBuffer.wrap(frame, 0, split), false);
             first.onBinary(socket, ByteBuffer.wrap(frame, split, frame.length - split), true);
             assertEquals(101, stream.read(KEY).quote().last().intValueExact());
+            assertEquals(NOW.plusMillis(125), stream.read(KEY).quote().providerAt());
             first.onClose(socket, 1001, "test");
             assertNull(stream.read(KEY).quote());
             assertEquals("DISCONNECTED", stream.read(KEY).status());
@@ -183,6 +230,8 @@ class MarketDataProviderTest {
             var second = established.poll(3, TimeUnit.SECONDS);
             assertNotNull(second);
             second.onBinary(socket, ByteBuffer.wrap(frame(current.get())), true);
+            firstSend.completeExceptionally(new IOException("late failure"));
+            first.onClose(socket, 1001, "late close");
             current.set(NOW.plusSeconds(35));
             assertEquals("STALE", stream.read(KEY).quote().freshness());
             assertEquals(NOW.plusSeconds(3), stream.read(KEY).quote().receivedAt());
@@ -190,11 +239,31 @@ class MarketDataProviderTest {
         }
     }
 
+    @Test
+    void connectedSocketWithoutAnInitialDataFrameTimesOut() throws Exception {
+        var current = new AtomicReference<>(NOW);
+        var opened = new CountDownLatch(1);
+        var socket = mock(WebSocket.class);
+        when(socket.sendBinary(any(), anyBoolean())).thenReturn(CompletableFuture.completedFuture(socket));
+        try (var stream = new UpstoxQuoteStream(JSON, changingClock(current), () -> URI.create("wss://fixture.upstox.com/fixture"),
+            (key, at, received, status, last, change) -> { throw new AssertionError(); }, (uri, listener) -> {
+                listener.onOpen(socket);
+                opened.countDown();
+                return CompletableFuture.completedFuture(socket);
+            })) {
+            assertEquals("CONNECTING", stream.read(KEY).status());
+            assertTrue(opened.await(3, TimeUnit.SECONDS));
+            current.set(NOW.plusSeconds(13));
+            assertEquals("DISCONNECTED", stream.read(KEY).status());
+            verify(socket).abort();
+        }
+    }
+
     private static byte[] frame(Instant time) throws IOException {
         byte[] ltpc = bytes(out -> { out.writeDouble(1, 101); out.writeInt64(2, time.toEpochMilli()); out.writeDouble(4, 100); });
         byte[] feed = bytes(out -> out.writeByteArray(1, ltpc));
         byte[] entry = bytes(out -> { out.writeString(1, KEY); out.writeByteArray(2, feed); });
-        return bytes(out -> out.writeByteArray(2, entry));
+        return bytes(out -> { out.writeByteArray(2, entry); out.writeInt64(3, time.plusMillis(125).toEpochMilli()); });
     }
 
     interface Output { void write(CodedOutputStream output) throws IOException; }
@@ -210,6 +279,13 @@ class MarketDataProviderTest {
         return assertThrows(MarketDataAccess.Rejected.class, request).failure.code();
     }
     private static Clock fixedClock() { return Clock.fixed(NOW, ZoneOffset.UTC); }
+    private static Clock changingClock(AtomicReference<Instant> current) {
+        return new Clock() {
+            @Override public ZoneId getZone() { return ZoneOffset.UTC; }
+            @Override public Clock withZone(ZoneId zone) { return Clock.fixed(instant(), zone); }
+            @Override public Instant instant() { return current.get(); }
+        };
+    }
     private static UpstoxMarketData provider(Clock clock, boolean configured, UpstoxMarketData.Transport transport) {
         return new UpstoxMarketData(JSON, clock, configured, transport);
     }

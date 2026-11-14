@@ -7,15 +7,21 @@ const format = new Intl.NumberFormat('en-IN', { maximumFractionDigits: 4 });
 const timestamp = new Intl.DateTimeFormat('en-IN', {
   timeZone: 'Asia/Kolkata', dateStyle: 'medium', timeStyle: 'medium'
 });
+const istDay = new Intl.DateTimeFormat('en-CA', {
+  timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit'
+});
 const date = value => value ? timestamp.format(new Date(value)) + ' IST' : '—';
 const value = n => n == null ? '—' : format.format(n);
 const labels = { DISCONNECTED: 'Disconnected', CONFIGURED: 'Ready to connect', TOKEN_REQUIRED: 'Token required',
   CONNECTING: 'Connecting', CONNECTED: 'Connected', MARKET_AUTH_FAILED: 'Credentials rejected',
+  MARKET_PROVIDER_FORBIDDEN: 'Upstox access denied',
+  MARKET_STREAM_AUTH_FAILED: 'Stream authorization rejected',
   MARKET_RATE_LIMITED: 'Rate limited', STALE: 'Stale trade', UNKNOWN: 'Freshness unknown', RECENT: 'Recent trade',
   UNAVAILABLE: 'Quote unavailable' };
 const hints = { MARKET_AUTH_FAILED: 'Upstox rejected the credential. Renew it on the server.',
   MARKET_TOKEN_REQUIRED: 'Set the authorized token on the server.',
   MARKET_PERMISSION_REQUIRED: 'This account has no permission for this data.',
+  MARKET_PROVIDER_FORBIDDEN: 'Upstox denied this request. Check the account’s provider access.',
   MARKET_RATE_LIMITED: 'The feed is rate limited. Try again shortly.',
   MARKET_TIMEOUT: 'The provider timed out. Try again.',
   MARKET_QUOTE_UNAVAILABLE: 'Upstox returned no quote for this instrument.' };
@@ -68,31 +74,45 @@ export default function MarketData({ signOut, Chart }) {
   const [segment, setSegment] = useState('EQUITY');
   const [page, setPage] = useState(1);
   const [instrument, setInstrument] = useState(null);
-  const [interval, setInterval] = useState('DAILY');
+  const [interval, setHistoryInterval] = useState('DAILY');
   const [expiry, setExpiry] = useState('');
   const [strike, setStrike] = useState('');
   const [streaming, setStreaming] = useState(false);
   const [stream, setStream] = useState(null);
+  const [now, setNow] = useState(Date.now);
   const [revision, setRevision] = useState(0);
   const [pinError, setPinError] = useState('');
   const key = instrument?.key;
+  const withinScope = instrument && instrument.status !== 'EXPIRED' &&
+    (!instrument.expiry || instrument.expiry >= istDay.format(now)) &&
+    (!key.startsWith('NSE_FO|') || can('DERIVATIVES'));
   const params = options => '?' + new URLSearchParams(options);
   const searchPath = can('CATALOG') && search.trim() &&
     '/instruments' + params({ q: search.trim(), exchange, segment, page });
   const results = useRead(read, searchPath, 260);
-  const snapshot = useRead(read, can('QUOTES') && key && '/quote' + params({ key }));
-  const session = useRead(read, can('QUOTES') && instrument && '/exchange-status' + params({ exchange: instrument.exchange }));
-  const history = useRead(read, can('HISTORY') && key && '/candles' + params({ key, interval }));
+  const snapshot = useRead(read, can('QUOTES') && withinScope && '/quote' + params({ key }));
+  const session = useRead(read, can('QUOTES') && withinScope && '/exchange-status' + params({ exchange: instrument.exchange }));
+  const history = useRead(read, can('HISTORY') && withinScope && '/candles' + params({ key, interval }));
   const hasWatchlist = capabilities.includes('WATCHLIST');
   const watchlist = useRead(read, hasWatchlist && '/watchlist' + params({ revision }));
   const detail = useRead(read, can('CATALOG') && can('CATALOG_STORAGE') && instrument?.fromWatchlist &&
     '/instrument' + params({ key }));
   const underlying = instrument?.underlyingKey || ((instrument?.exchange === 'NSE' && ['INDEX', 'EQUITY'].includes(instrument.type)) ? key : '');
   const contracts = useRead(read, can('CATALOG') && can('DERIVATIVES') && underlying && '/options' + params({ key: underlying }));
-  const activeExpiry = expiry || instrument?.expiry || contracts.data?.map(row => row.expiry).sort()[0] || '';
+  const today = istDay.format(now);
+  const expiries = [...new Set([instrument?.expiry, ...(contracts.data || empty).map(row => row.expiry)]
+    .filter(item => item && item >= today))].sort();
+  const activeExpiry = expiries.includes(expiry) ? expiry :
+    expiries.includes(instrument?.expiry) ? instrument.expiry : expiries[0] || '';
   const chain = useRead(read, can('OPTION_CHAIN') && can('DERIVATIVES') && underlying && activeExpiry &&
     '/option-chain' + params({ key: underlying, expiry: activeExpiry }));
-  const streamEnabled = can('STREAM') && streaming && !!key;
+  const streamEnabled = can('STREAM') && streaming && !!withinScope;
+  useEffect(() => {
+    if (!key) return;
+    setNow(Date.now());
+    const timer = setInterval(() => setNow(Date.now()), 2_000);
+    return () => clearInterval(timer);
+  }, [key]);
   useEffect(() => {
     if (!streamEnabled) return;
     const controller = new AbortController();
@@ -113,8 +133,9 @@ export default function MarketData({ signOut, Chart }) {
   const tick = streamEnabled && stream?.key === key ? stream : null;
   const snap = snapshot.data;
   const streamQuote = tick?.quote;
-  const quote = streamQuote && (!snap?.exchangeAt || streamQuote.exchangeAt >= snap.exchangeAt) ? streamQuote : snap;
-  const freshness = quote?.freshness === 'RECENT' && quote.exchangeAt && Date.now() - Date.parse(quote.exchangeAt) > 30_000
+  const quote = streamQuote && (!snap?.exchangeAt || Date.parse(streamQuote.exchangeAt) >= Date.parse(snap.exchangeAt))
+    ? streamQuote : snap;
+  const freshness = quote?.freshness === 'RECENT' && quote.exchangeAt && now - Date.parse(quote.exchangeAt) > 30_000
     ? 'STALE' : quote?.freshness;
   const pinned = watchlist.data?.some(row => row.instrumentKey === key);
   const chart = React.useMemo(() => history.data?.candles.slice(-220).map(bar => ({
@@ -123,7 +144,6 @@ export default function MarketData({ signOut, Chart }) {
   const resultRows = results.data?.instruments || empty;
   const lots = new Map((contracts.data || empty).map(row => [row.key, row.lotSize]));
   const strikes = (chain.data?.strikes || empty).filter(row => !strike || String(row.strike).includes(strike.trim()));
-  const expiries = [...new Set([instrument?.expiry, ...(contracts.data || empty).map(row => row.expiry)].filter(Boolean))].sort();
 
   function select(row) {
     setInstrument(row);
@@ -166,10 +186,11 @@ export default function MarketData({ signOut, Chart }) {
         <div className="catalog-filters">
           <select aria-label="Provider exchange" value={exchange} disabled={!can('CATALOG')}
             onChange={e => { setPage(1); setExchange(e.target.value); }}>
-            <option value="">All exchanges</option><option>NSE</option><option>BSE</option>
+            <option value="">{segment === 'EQUITY' ? 'All exchanges' : 'NSE'}</option>
+            {segment === 'EQUITY' && <><option>NSE</option><option>BSE</option></>}
           </select>
           <select aria-label="Provider segment" value={segment} disabled={!can('CATALOG')}
-            onChange={e => { setPage(1); setSegment(e.target.value); }}>
+            onChange={e => { setPage(1); setSegment(e.target.value); setExchange(''); }}>
             <option value="EQUITY">Equities</option><option value="INDEX">Indices</option>
             {can('DERIVATIVES') && <><option value="FUTURES">Futures</option><option value="OPTIONS">Options</option></>}
           </select>
@@ -209,22 +230,24 @@ export default function MarketData({ signOut, Chart }) {
           {quote?.change != null && <span>{quote.change > 0 && '+'}{value(quote.change)}
             {quote.percentChange != null && ' (' + value(quote.percentChange) + '%)'} vs previous close</span>}</div>
           <p className="provider-stamp muted" role="status">{tick?.error || snapshot.error || (quote
-            ? (labels[freshness] || freshness) + ' · Last trade ' + date(quote.exchangeAt) + ' · Received ' + date(quote.receivedAt)
-            : snapshot.data || !can('QUOTES') ? 'Quote unavailable.' : 'Waiting for a quote.')}
-            {session.data && ' · ' + session.data.status.replaceAll('_', ' ').toLowerCase()}</p>
+            ? (labels[freshness] || freshness) + ' · Last trade ' + date(quote.exchangeAt) +
+              (quote.providerAt ? ' · Provider ' + date(quote.providerAt) : '') + ' · Received ' + date(quote.receivedAt)
+            : snapshot.data || !can('QUOTES') || !withinScope ? 'Quote unavailable.' : 'Waiting for a quote.')}
+            {(quote?.marketStatus && quote.marketStatus !== 'UNKNOWN' ? quote.marketStatus : session.data?.status)
+              ?.replaceAll('_', ' ').toLowerCase().replace(/^/, ' · ')}</p>
           {snap && <dl className="provider-ohlc mono">{[['Open','open'],['High','high'],['Low','low'],['Close','close'],['Volume','volume']].map(([label, field]) =>
             <div key={field}><dt>{label}</dt><dd>{value(snap[field])}</dd></div>)}</dl>}
-          {can('STREAM') && <div className="provider-stamp"><button className="quiet" onClick={() => { setStream(null); setStreaming(!streaming); }}>
+          {can('STREAM') && withinScope && <div className="provider-stamp"><button className="quiet" onClick={() => { setStream(null); setStreaming(!streaming); }}>
             {streaming ? 'Stop price updates' : 'Start price updates'}</button>
             {streaming && <span role="status"> {labels[tick?.status] || 'Connecting'}</span>}</div>}</>}
         <div className="chart-tools"><span><ChartCandlestick size={15}/> Historical candles</span>
           {key && can('HISTORY') && <div className="tabs">{status.data.intervals.map(item =>
             <button className={interval === item ? 'selected' : ''} aria-pressed={interval === item} key={item}
-              onClick={() => setInterval(item)}>{intervalLabel[item]}</button>)}</div>}</div>
+              onClick={() => setHistoryInterval(item)}>{intervalLabel[item]}</button>)}</div>}</div>
         {chart.length ? <><Chart candles={chart} symbol={instrument.exchange + ':' + instrument.symbol} interval={interval}/>
           <p className="provider-stamp muted">Upstox · Last bar {date(chart.at(-1).exchangeAt)} · Retrieved {date(history.data.receivedAt)}</p></> :
           <p className="empty-chart" role={history.error ? 'alert' : 'status'}>{history.error ||
-            (key && can('HISTORY') && !history.data ? 'Loading historical candles…' : 'Historical candles unavailable.')}</p>}
+            (withinScope && can('HISTORY') && !history.data ? 'Loading historical candles…' : 'Historical candles unavailable.')}</p>}
       </section>
     </div>
 

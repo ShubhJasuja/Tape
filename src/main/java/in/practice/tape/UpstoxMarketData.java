@@ -35,8 +35,9 @@ final class UpstoxMarketData implements MarketDataProvider, AutoCloseable {
     private final Transport transport;
     private final ObjectMapper json;
     private final Clock clock;
-    private final Semaphore inFlight = new Semaphore(2);
+    private final Semaphore inFlight = new Semaphore(4);
     private final Deque<Instant> calls = new ArrayDeque<>();
+    private Instant credentialRejectedUntil = Instant.MIN;
     private Instant blockedUntil = Instant.MIN;
     private final boolean configured;
     private final UpstoxQuoteStream stream;
@@ -58,7 +59,7 @@ final class UpstoxMarketData implements MarketDataProvider, AutoCloseable {
         this.clock = clock;
         this.configured = configured;
         this.stream = new UpstoxQuoteStream(json, clock, this::authorizeStream, (key, at, received, status, last, change) ->
-            quote(key, at, received, status, last, change, null, null, null, null, null));
+            quote(key, at, null, received, status, last, change, null, null, null, null, null));
     }
 
     @jakarta.annotation.PreDestroy
@@ -132,22 +133,29 @@ final class UpstoxMarketData implements MarketDataProvider, AutoCloseable {
 
     @Override public Quote quote(String key) {
         var response = get("/v3/market-quote/quotes?instrument_key=" + encode(key)).path("data");
+        if (!response.isObject()) throw failure(HttpStatus.BAD_GATEWAY, "MARKET_INVALID_RESPONSE");
         Instant received = clock.instant();
-        for (var row : response) {
-            if (!key.equals(str(row, "instrument_token"))) continue;
+        for (var entry : response.properties()) {
+            var row = entry.getValue();
+            String token = str(row, "instrument_token");
+            boolean indexKeyMatches = token == null && key.startsWith("NSE_INDEX|") &&
+                entry.getKey().equals(key.replace('|', ':'));
+            if (!key.equals(token) && !indexKeyMatches) continue;
             BigDecimal last = positive(row.get("last_price"));
             BigDecimal change = number(row.get("net_change"));
+            BigDecimal previous = positive(row.get("prev_close_price"));
+            if (change == null && last != null && previous != null) change = last.subtract(previous);
             var ohlc = row.path("ohlc");
             var session = sessions.get(exchange(key));
             String status = session == null || session.received.plusSeconds(30).isBefore(received) ? "UNKNOWN" : session.status;
-            return quote(key, epoch(row.get("last_trade_time")), received, status, last, change,
+            return quote(key, epoch(row.get("last_trade_time")), dateTime(row.path("timestamp").asText()), received, status, last, change,
                 positive(ohlc.get("open")), positive(ohlc.get("high")), positive(ohlc.get("low")), positive(ohlc.get("close")),
                 count(row.get("volume")));
         }
         throw failure(HttpStatus.NOT_FOUND, "MARKET_QUOTE_UNAVAILABLE");
     }
 
-    Quote quote(String key, Instant exchangeAt, Instant received, String marketStatus, BigDecimal last, BigDecimal change,
+    Quote quote(String key, Instant exchangeAt, Instant providerAt, Instant received, String marketStatus, BigDecimal last, BigDecimal change,
                 BigDecimal open, BigDecimal high, BigDecimal low, BigDecimal close, Long volume) {
         Long age = exchangeAt == null ? null : Duration.between(exchangeAt, received).toMillis();
         String freshness = last == null ? "UNAVAILABLE" : age == null || age < -5_000 ? "UNKNOWN" :
@@ -155,7 +163,7 @@ final class UpstoxMarketData implements MarketDataProvider, AutoCloseable {
         BigDecimal previous = last != null && change != null ? last.subtract(change) : null;
         BigDecimal percent = previous != null && previous.signum() > 0 ?
             change.multiply(BigDecimal.valueOf(100)).divide(previous, 4, RoundingMode.HALF_UP) : null;
-        return new Quote(source(), exchange(key), key, exchangeAt, received, freshness, age, marketStatus,
+        return new Quote(source(), exchange(key), key, exchangeAt, providerAt, received, freshness, age, marketStatus,
             last, change, percent, open, high, low, close, volume);
     }
 
@@ -269,12 +277,13 @@ final class UpstoxMarketData implements MarketDataProvider, AutoCloseable {
                 takeSlot();
                 try {
                     Response response = transport.get(path);
-                    if (response.status == 401 || response.status == 403) {
-                        cooldown(60);
+                    if (response.status == 401) {
+                        rejectCredential();
                         throw failure(HttpStatus.SERVICE_UNAVAILABLE, "MARKET_AUTH_FAILED");
                     }
+                    if (response.status == 403) throw failure(HttpStatus.FORBIDDEN, "MARKET_PROVIDER_FORBIDDEN");
                     if (response.status == 429) {
-                        cooldown(retrySeconds(response.retryAfter));
+                        cooldown(retrySeconds(response.retryAfter, clock.instant()));
                         throw failure(HttpStatus.TOO_MANY_REQUESTS, "MARKET_RATE_LIMITED");
                     }
                     if (response.status >= 500 && attempt == 0) continue;
@@ -305,6 +314,7 @@ final class UpstoxMarketData implements MarketDataProvider, AutoCloseable {
 
     private synchronized void takeSlot() {
         Instant now = clock.instant();
+        if (credentialRejectedUntil.isAfter(now)) throw failure(HttpStatus.SERVICE_UNAVAILABLE, "MARKET_AUTH_FAILED");
         while (!calls.isEmpty() && !calls.peekFirst().plusSeconds(1800).isAfter(now)) calls.removeFirst();
         if (blockedUntil.isAfter(now) || calls.size() >= 1550 ||
             calls.stream().filter(time -> time.plusSeconds(60).isAfter(now)).count() >= 400 ||
@@ -314,11 +324,21 @@ final class UpstoxMarketData implements MarketDataProvider, AutoCloseable {
         calls.addLast(now);
     }
 
-    private synchronized void cooldown(long seconds) { blockedUntil = clock.instant().plusSeconds(seconds); }
+    private synchronized void rejectCredential() { credentialRejectedUntil = clock.instant().plusSeconds(60); }
 
-    private static long retrySeconds(String header) {
-        try { return Math.clamp(Long.parseLong(header), 2, 1800); }
-        catch (NumberFormatException e) { return 60; }
+    private synchronized void cooldown(long seconds) {
+        var until = clock.instant().plusSeconds(seconds);
+        if (until.isAfter(blockedUntil)) blockedUntil = until;
+    }
+
+    private static long retrySeconds(String header, Instant now) {
+        try { return Math.clamp(Long.parseLong(header.strip()), 2, 1800); }
+        catch (NumberFormatException e) {
+            try {
+                var date = ZonedDateTime.parse(header.strip(), java.time.format.DateTimeFormatter.RFC_1123_DATE_TIME);
+                return Math.clamp(Duration.between(now, date.toInstant()).toSeconds() + 1, 2, 1800);
+            } catch (DateTimeException invalid) { return 60; }
+        }
     }
     static String encode(String value) { return URLEncoder.encode(value, StandardCharsets.UTF_8).replace("+", "%20"); }
     private static JsonNode array(JsonNode node) {

@@ -20,7 +20,7 @@ interface MarketDataProvider {
                       String isin, Segment type, String status, LocalDate expiry, String underlyingKey,
                       String underlyingType, BigDecimal strike, String side, Long lotSize, BigDecimal tickSizePaise) {}
     record Page(List<Instrument> instruments, Integer nextPage) {}
-    record Quote(String source, String exchange, String key, Instant exchangeAt, Instant receivedAt,
+    record Quote(String source, String exchange, String key, Instant exchangeAt, Instant providerAt, Instant receivedAt,
                  String freshness, Long ageMillis, String marketStatus, BigDecimal last, BigDecimal change,
                  BigDecimal percentChange, BigDecimal open, BigDecimal high, BigDecimal low, BigDecimal close,
                  Long volume) {}

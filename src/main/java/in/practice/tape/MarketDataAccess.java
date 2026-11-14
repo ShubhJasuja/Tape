@@ -10,6 +10,7 @@ import org.springframework.stereotype.Component;
 import java.time.LocalDate;
 import java.util.Arrays;
 import java.util.Set;
+import java.util.Locale;
 import java.util.UUID;
 import java.util.stream.Collectors;
 
@@ -27,9 +28,12 @@ final class MarketDataAccess {
         local = env.acceptsProfiles(Profiles.of("accounts-local"));
         owner = env.getProperty("TAPE_MARKET_OWNER_ID", "").strip();
         String reference = env.getProperty("TAPE_MARKET_PERMISSION_REF", "").strip();
+        String delay = env.getProperty("TAPE_MARKET_DISPLAY_DELAY", "").strip().toUpperCase(Locale.ROOT);
         approved = reference.isEmpty() || owner.isEmpty() || !local ? Set.of() :
             Arrays.stream(env.getProperty("TAPE_MARKET_PERMISSIONS", "").split(","))
                 .map(String::strip).filter(value -> !value.isEmpty()).map(Capability::valueOf)
+                .filter(capability -> "NONE".equals(delay) || !Set.of(Capability.QUOTES, Capability.HISTORY,
+                    Capability.STREAM, Capability.OPTION_CHAIN).contains(capability))
                 .collect(Collectors.toUnmodifiableSet());
         configured = !env.getProperty("UPSTOX_ANALYTICS_TOKEN", "").isBlank();
     }

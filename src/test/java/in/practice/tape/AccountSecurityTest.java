@@ -242,7 +242,7 @@ class AccountSecurityTest {
         UUID ownerId = owner.queryForObject("SELECT user_id FROM local_credentials WHERE email=?", UUID.class, ownerEmail);
         new ResourceDatabasePopulator(new FileSystemResource("docs/market-data-runtime-grants.sql")).execute(owner.getDataSource());
         try (var market = startApplication(true, false, false, Map.of("TAPE_MARKET_OWNER_ID", ownerId.toString(),
-            "TAPE_MARKET_PERMISSION_REF", "test-gate", "TAPE_MARKET_PERMISSIONS", "WATCHLIST,QUOTES",
+            "TAPE_MARKET_PERMISSION_REF", "test-gate", "TAPE_MARKET_PERMISSIONS", "WATCHLIST,QUOTES", "TAPE_MARKET_DISPLAY_DELAY", "NONE",
             "UPSTOX_ANALYTICS_TOKEN", ""))) {
             var client = new Browser(market);
             assertEquals(204, client.login(ownerEmail, PASSWORD).statusCode());

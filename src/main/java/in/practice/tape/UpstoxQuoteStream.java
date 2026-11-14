@@ -61,36 +61,50 @@ final class UpstoxQuoteStream implements AutoCloseable {
         }
         Session session = active;
         session.demand = now;
-        if ("CONNECTED".equals(session.status) && session.lastMessage.plus(IDLE).isBefore(now)) {
-            failed(session, "DISCONNECTED");
+        if (session.socket != null && (session.lastMessage.plus(IDLE).isBefore(now) ||
+            (session.connecting && session.openedAt.plusSeconds(12).isBefore(now)))) {
+            failed(session, session.attempt, "DISCONNECTED");
         }
         if (!session.connecting && session.socket == null && !session.retryAt.isAfter(now)) {
             session.connecting = true;
             session.status = "CONNECTING";
-            worker.execute(() -> connect(session));
+            long attempt = ++session.attempt;
+            worker.execute(() -> connect(session, attempt));
         }
         var quote = session.tick == null || !"CONNECTED".equals(session.status) ? null :
             quotes.create(key, session.tick.at, now, session.marketStatus, session.tick.last, session.tick.change);
         if (quote != null) {
             var received = session.tick.received;
-            quote = new MarketDataProvider.Quote(quote.source(), quote.exchange(), quote.key(), quote.exchangeAt(), received,
+            quote = new MarketDataProvider.Quote(quote.source(), quote.exchange(), quote.key(), quote.exchangeAt(), session.tick.providerAt, received,
                 quote.freshness(), quote.ageMillis(), quote.marketStatus(), quote.last(), quote.change(), quote.percentChange(),
                 null, null, null, null, null);
         }
         return new MarketDataProvider.Stream(session.status, quote);
     }
 
-    private void connect(Session session) {
+    private void connect(Session session, long attempt) {
         synchronized (this) { if (closed || active != session) return; }
         try {
             URI uri = authorize.get();
             synchronized (this) { if (closed || active != session) return; }
-            connector.connect(uri, session).orTimeout(8, java.util.concurrent.TimeUnit.SECONDS)
-                .whenComplete((socket, error) -> { if (error != null) failed(session, "DISCONNECTED"); });
+            var handshake = connector.connect(uri, new Attempt(session, attempt));
+            handshake.orTimeout(8, java.util.concurrent.TimeUnit.SECONDS).whenComplete((socket, error) -> {
+                if (error != null) {
+                    var cause = error instanceof java.util.concurrent.CompletionException ? error.getCause() : error;
+                    String status = cause instanceof java.net.http.WebSocketHandshakeException rejected ?
+                        switch (rejected.getResponse().statusCode()) {
+                            case 401 -> "MARKET_STREAM_AUTH_FAILED";
+                            case 403 -> "MARKET_PROVIDER_FORBIDDEN";
+                            case 429 -> "MARKET_RATE_LIMITED";
+                            default -> "DISCONNECTED";
+                        } : "DISCONNECTED";
+                    failed(session, attempt, status);
+                }
+            });
         } catch (MarketDataAccess.Rejected e) {
-            failed(session, e.failure.code());
+            failed(session, attempt, e.failure.code());
         } catch (RuntimeException e) {
-            failed(session, "DISCONNECTED");
+            failed(session, attempt, "DISCONNECTED");
         }
     }
 
@@ -104,17 +118,21 @@ final class UpstoxQuoteStream implements AutoCloseable {
         if (old != null && old.socket != null) old.socket.abort();
     }
 
-    private synchronized void failed(Session session, String status) {
-        if (active != session || (!session.connecting && session.socket == null)) return;
-        if (session.socket != null) session.socket.abort();
+    private synchronized void failed(Session session, long attempt, String status) {
+        if (active != session || session.attempt != attempt || (!session.connecting && session.socket == null)) return;
+        var socket = session.socket;
         session.socket = null;
         session.connecting = false;
         session.tick = null;
         session.marketStatus = "UNKNOWN";
         session.status = status;
-        long wait = status.equals("MARKET_AUTH_FAILED") ? 60 : Math.min(30, 1L << Math.min(5, ++session.failures));
+        long wait = switch (status) {
+            case "MARKET_AUTH_FAILED", "MARKET_STREAM_AUTH_FAILED", "MARKET_PROVIDER_FORBIDDEN", "MARKET_RATE_LIMITED" -> 60;
+            default -> Math.min(30, 1L << Math.min(5, ++session.failures));
+        };
         session.retryAt = clock.instant().plusSeconds(wait);
         session.frame.reset();
+        if (socket != null) socket.abort();
     }
 
     @Override public synchronized void close() {
@@ -123,53 +141,69 @@ final class UpstoxQuoteStream implements AutoCloseable {
         worker.shutdownNow();
     }
 
-    private final class Session implements WebSocket.Listener {
+    private final class Session {
         final String key;
         final ByteArrayOutputStream frame = new ByteArrayOutputStream();
         WebSocket socket;
-        Instant retryAt = Instant.MIN, demand = clock.instant(), lastMessage = demand;
+        Instant retryAt = Instant.MIN, demand = clock.instant(), lastMessage = demand, openedAt = demand;
         boolean connecting;
         int failures;
+        long attempt;
         String status = "DISCONNECTED", marketStatus = "UNKNOWN";
         Tick tick;
 
         Session(String key) { this.key = key; }
+    }
+
+    private final class Attempt implements WebSocket.Listener {
+        private final Session session;
+        private final long id;
+
+        Attempt(Session session, long id) { this.session = session; this.id = id; }
+
+        private boolean current(WebSocket ws) { return active == session && session.attempt == id && session.socket == ws; }
 
         @Override public void onOpen(WebSocket ws) {
             synchronized (UpstoxQuoteStream.this) {
-                if (closed || active != this || !connecting) { ws.abort(); return; }
-                socket = ws;
-                lastMessage = clock.instant();
+                if (closed || active != session || session.attempt != id || !session.connecting) { ws.abort(); return; }
+                session.socket = ws;
+                session.lastMessage = session.openedAt = clock.instant();
                 try {
                     byte[] request = json.writeValueAsBytes(Map.of("guid", UUID.randomUUID().toString(), "method", "sub",
-                        "data", Map.of("mode", "ltpc", "instrumentKeys", java.util.List.of(key))));
+                        "data", Map.of("mode", "ltpc", "instrumentKeys", java.util.List.of(session.key))));
                     ws.sendBinary(ByteBuffer.wrap(request), true)
-                        .whenComplete((ignored, error) -> { if (error != null) failed(this, "DISCONNECTED"); });
+                        .whenComplete((ignored, error) -> { if (error != null) failed(session, id, "DISCONNECTED"); });
                 } catch (IOException e) {
-                    failed(this, "DISCONNECTED");
+                    failed(session, id, "DISCONNECTED");
                 }
-                ws.request(1);
+                if (current(ws)) ws.request(1);
             }
         }
 
         @Override public CompletionStage<?> onBinary(WebSocket ws, ByteBuffer fragment, boolean last) {
             synchronized (UpstoxQuoteStream.this) {
-                if (active != this || socket != ws) return null;
-                if (fragment.remaining() > FRAME_LIMIT - frame.size()) { failed(this, "DISCONNECTED"); return null; }
+                if (!current(ws)) return null;
+                var frame = session.frame;
+                if (fragment.remaining() > FRAME_LIMIT - frame.size()) { failed(session, id, "DISCONNECTED"); return null; }
                 byte[] bytes = new byte[fragment.remaining()];
                 fragment.get(bytes);
                 frame.writeBytes(bytes);
                 if (last) {
                     try {
-                        var update = decode(frame.toByteArray(), key, clock.instant());
-                        lastMessage = clock.instant();
-                        if (update.marketStatus != null) marketStatus = update.marketStatus;
-                        if (update.tick != null && (tick == null || !update.tick.at.isBefore(tick.at))) tick = update.tick;
-                        connecting = false;
-                        failures = 0;
-                        status = "CONNECTED";
+                        var received = clock.instant();
+                        var update = decode(frame.toByteArray(), session.key, received);
+                        if (update.marketStatus != null) session.marketStatus = update.marketStatus;
+                        if (update.tick != null && (session.tick == null || !update.tick.at.isBefore(session.tick.at))) {
+                            session.tick = update.tick;
+                            session.failures = 0;
+                        }
+                        if (update.marketStatus != null || update.tick != null) {
+                            session.lastMessage = received;
+                            session.connecting = false;
+                            session.status = "CONNECTED";
+                        }
                     } catch (IOException | RuntimeException e) {
-                        failed(this, "DISCONNECTED");
+                        failed(session, id, "DISCONNECTED");
                         return null;
                     } finally {
                         frame.reset();
@@ -182,26 +216,27 @@ final class UpstoxQuoteStream implements AutoCloseable {
 
         @Override public CompletionStage<?> onPing(WebSocket ws, ByteBuffer message) {
             synchronized (UpstoxQuoteStream.this) {
-                if (active == this && socket == ws) { lastMessage = clock.instant(); ws.request(1); }
+                if (current(ws)) { session.lastMessage = clock.instant(); ws.request(1); }
             }
             return null;
         }
         @Override public CompletionStage<?> onClose(WebSocket ws, int code, String reason) {
-            synchronized (UpstoxQuoteStream.this) { if (socket == ws) failed(this, "DISCONNECTED"); }
+            synchronized (UpstoxQuoteStream.this) { if (current(ws)) failed(session, id, "DISCONNECTED"); }
             return null;
         }
         @Override public void onError(WebSocket ws, Throwable error) {
-            synchronized (UpstoxQuoteStream.this) { if (socket == ws) failed(this, "DISCONNECTED"); }
+            synchronized (UpstoxQuoteStream.this) { if (current(ws)) failed(session, id, "DISCONNECTED"); }
         }
     }
 
-    record Tick(Instant at, Instant received, BigDecimal last, BigDecimal change) {}
+    record Tick(Instant at, Instant providerAt, Instant received, BigDecimal last, BigDecimal change) {}
     record Update(Tick tick, String marketStatus) {}
 
     // Only the documented FeedResponse/Feed/LTPC and segment-status fields are read.
     static Update decode(byte[] bytes, String key, Instant received) throws IOException {
         var input = CodedInputStream.newInstance(bytes);
         Tick quote = null;
+        Instant providerAt = null;
         String status = null;
         for (int tag; (tag = input.readTag()) != 0;) {
             if (tag == 18) {
@@ -214,11 +249,13 @@ final class UpstoxQuoteStream implements AutoCloseable {
                     else entry.skipField(field);
                 }
                 if (key.equals(found) && value != null) quote = tick(value, received);
+            } else if (tag == 24) {
+                providerAt = wireTime(input.readInt64());
             } else if (tag == 34) {
                 status = marketStatus(input.readByteArray(), key.substring(0, key.indexOf('|')));
             } else input.skipField(tag);
         }
-        return new Update(quote, status);
+        return new Update(quote == null ? null : new Tick(quote.at, providerAt, received, quote.last, quote.change), status);
     }
 
     private static Tick tick(byte[] bytes, Instant received) throws IOException {
@@ -234,12 +271,17 @@ final class UpstoxQuoteStream implements AutoCloseable {
                 else if (tag == 33) close = ltpc.readDouble();
                 else ltpc.skipField(tag);
             }
-            if (!Double.isFinite(price) || price <= 0 || time < 946684800000L || time >= 7258118400000L) return null;
+            Instant at = wireTime(time);
+            if (!Double.isFinite(price) || price <= 0 || at == null) return null;
             var last = BigDecimal.valueOf(price);
-            return new Tick(Instant.ofEpochMilli(time), received, last,
+            return new Tick(at, null, received, last,
                 Double.isFinite(close) && close > 0 ? last.subtract(BigDecimal.valueOf(close)) : null);
         }
         return null;
+    }
+
+    private static Instant wireTime(long millis) {
+        return millis >= 946684800000L && millis < 7258118400000L ? Instant.ofEpochMilli(millis) : null;
     }
 
     private static String marketStatus(byte[] bytes, String segment) throws IOException {
