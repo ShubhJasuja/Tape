@@ -454,6 +454,22 @@ class DerivativeBookTest {
     }
 
     @Test
+    void futuresFillAtScheduledMarkUsesJournalSequence() {
+        var session = practice(true);
+        LocalDate day = LocalDate.of(2026, 1, 5);
+        var future = shortDatedFuture(day.plusDays(7), 200_000, 150_000);
+        var listing = futureListing(session, future);
+        session.place(listing, PracticeOptions.Side.BUY, 2, null);
+
+        now = close(day);
+        assertEquals("FILLED", session.place(listing, PracticeOptions.Side.SELL, 1, null).status());
+        var view = session.options.view(session.owner, session.account, 0);
+        var atClose = view.journal().stream().filter(event -> now.equals(event.occurredAt())).toList();
+        assertEquals(java.util.List.of("FILL", "MARK"), atClose.stream().map(event -> event.kind()).toList());
+        session.options.reconcile(session.owner, session.account);
+    }
+
+    @Test
     void futuresRecoverMissedDailyMarksAndSettleOnceWithOrderExpiry() {
         var session = practice(true);
         LocalDate day = LocalDate.of(2026, 1, 5);
