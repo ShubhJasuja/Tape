@@ -35,6 +35,7 @@ class PostgresSchemaTest {
     private static UUID existingOrder;
     private static UUID existingWatchlist;
     private static UUID existingOption;
+    private static UUID existingOwner;
 
     @BeforeAll
     static void initializeEmptyDatabase() {
@@ -45,7 +46,7 @@ class PostgresSchemaTest {
             POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword()));
         assertNull(pg.queryForObject("SELECT to_regclass('public.trading_accounts')::text", String.class));
         Flyway.configure().dataSource(pg.getDataSource()).locations("classpath:db/migration/postgresql").target("4").load().migrate();
-        var existingOwner = user();
+        existingOwner = user();
         existingAccount = account(existingOwner, "DEMO");
         existingOrder = order(existingAccount, EXISTING_INSTRUMENT, UUID.randomUUID());
         pg.update("INSERT INTO positions (account_id,instrument_id,quantity,cost_paise) VALUES (?,?,4,40000)",
@@ -62,6 +63,7 @@ class PostgresSchemaTest {
             SELECT ?,?,?,id,1,'BUY',1,100,200,0,'OPEN',now(),now() FROM derivative_contracts
             WHERE source='TAPE_OPTIONS_PRACTICE_V1' ORDER BY id LIMIT 1
             """, existingOption, existingAccount, UUID.randomUUID());
+        pg.update("INSERT INTO market_watchlist(user_id,source,instrument_key) VALUES (?,'UPSTOX','NSE_INDEX|Fixture')", existingOwner);
         try (var application = startApplication()) {
             assertIsolatedDataSources(application);
         }
@@ -78,13 +80,16 @@ class PostgresSchemaTest {
         var owner = user();
         try (var application = startApplication()) {
             assertIsolatedDataSources(application);
-            assertEquals(List.of("1", "2", "3", "4", "5", "6", "7", "8", "9"), pg.queryForList(
+            assertEquals(List.of("1", "2", "3", "4", "5", "6", "7", "8", "9", "10"), pg.queryForList(
                 "SELECT version FROM flyway_schema_history WHERE success ORDER BY installed_rank", String.class));
             assertEquals(1L, count("SELECT count(*) FROM users WHERE id = ?", owner));
             assertEquals("NSE:RELIANCE", pg.queryForObject("SELECT requested_symbol FROM orders WHERE id=? AND instrument_id=?",
                 String.class, existingOrder, EXISTING_INSTRUMENT));
             assertEquals(1L, count("SELECT count(*) FROM watchlist_items WHERE watchlist_id=? AND instrument_id=?",
                 existingWatchlist, EXISTING_INSTRUMENT));
+            assertEquals(1L, count("""
+                SELECT count(*) FROM market_watchlist WHERE user_id=? AND watchlist_name='Default' AND instrument_key='NSE_INDEX|Fixture'
+                """, existingOwner));
             assertEquals(4L, count("SELECT quantity FROM positions WHERE account_id=? AND instrument_id=?",
                 existingAccount, EXISTING_INSTRUMENT));
             assertEquals(1L, count("SELECT count(*) FROM practice_derivative_orders WHERE id=? AND account_id=? AND status='OPEN' AND NOT reduce_only",
@@ -92,6 +97,21 @@ class PostgresSchemaTest {
             assertTrue(count("SELECT count(*) FROM practice_future_sessions WHERE contract_id IS NOT NULL") > 0);
             assertThrows(org.springframework.dao.DataAccessException.class, () -> pg.update("UPDATE practice_future_sessions SET mark_at=mark_at"));
         }
+    }
+
+    @Test
+    void namedProviderWatchlistsScopePinsToTheSameOwnerAndSupportBseIndices() {
+        var owner = user();
+        var other = user();
+        pg.update("INSERT INTO market_watchlists VALUES (?,'UPSTOX','Indices')", owner);
+        String pin = """
+            INSERT INTO market_watchlist(user_id,source,watchlist_name,instrument_key) VALUES (?,'UPSTOX','Indices','BSE_INDEX|Fixture')
+            """;
+        fails("23503", () -> pg.update(pin, other));
+        pg.update(pin, owner);
+        fails("23505", () -> pg.update(pin, owner));
+        pg.update("DELETE FROM market_watchlists WHERE user_id=? AND source='UPSTOX' AND name='Indices'", owner);
+        assertEquals(0L, count("SELECT count(*) FROM market_watchlist WHERE user_id=?", owner));
     }
 
     @Test

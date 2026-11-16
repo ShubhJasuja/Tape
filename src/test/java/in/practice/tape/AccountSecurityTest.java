@@ -327,6 +327,20 @@ class AccountSecurityTest {
             assertEquals(204, client.write("PUT", routes + "/watchlist", "{\"instrumentKey\":\"NSE_EQ|ZZ0000000002\"}",
                 "application/json", true).statusCode());
             assertEquals(1, JSON.readTree(client.get(routes + "/watchlist").body()).size());
+            String name = "{\"name\":\"Derivatives\"}";
+            assertEquals(403, client.write("POST", routes + "/watchlists", name, "application/json", false).statusCode());
+            assertEquals(204, client.write("POST", routes + "/watchlists", name, "application/json", true).statusCode());
+            assertEquals(2, JSON.readTree(client.get(routes + "/watchlists").body()).size());
+            assertEquals(204, client.write("PUT", routes + "/watchlist?name=Derivatives", "{\"instrumentKey\":\"BSE_INDEX|Fixture\"}",
+                "application/json", true).statusCode());
+            assertEquals("BSE_INDEX|Fixture", JSON.readTree(client.get(routes + "/watchlist?name=Derivatives").body()).get(0).path("instrumentKey").asText());
+            assertEquals(1, JSON.readTree(client.get(routes + "/watchlist").body()).size());
+            assertEquals(400, client.write("DELETE", routes + "/watchlists?name=Default", "", null, true).statusCode());
+            assertEquals(404, client.write("PUT", routes + "/watchlist?name=Missing", "{\"instrumentKey\":\"BSE_INDEX|Fixture\"}",
+                "application/json", true).statusCode());
+            assertEquals(403, client.get(routes + "/streams?keys=NSE_EQ%7CZZ0000000002").statusCode());
+            assertEquals(403, client.get(routes + "/intraday?key=NSE_EQ%7CZZ0000000002").statusCode());
+            assertEquals(403, client.get(routes + "/market-session?exchange=NSE").statusCode());
             assertEquals(204, client.write("DELETE", routes + "/watchlist?key=NSE_EQ%7CZZ0000000002", "", null, true).statusCode());
             assertTrue(JSON.readTree(client.get(routes + "/watchlist").body()).isEmpty());
             var other = new Browser(market);
@@ -334,14 +348,18 @@ class AccountSecurityTest {
             assertEquals(201, other.register(otherEmail).statusCode());
             assertEquals(204, other.login(otherEmail, PASSWORD).statusCode());
             assertEquals(403, other.get(routes + "/watchlist").statusCode());
+            assertEquals(403, other.get(routes + "/watchlist?name=Derivatives").statusCode());
+            assertEquals(403, other.write("DELETE", routes + "/watchlists?name=Derivatives", "", null, true).statusCode());
+            assertEquals(204, client.write("DELETE", routes + "/watchlists?name=Derivatives", "", null, true).statusCode());
+            assertTrue(JSON.readTree(client.get(routes + "/watchlist?name=Derivatives").body()).isEmpty());
         }
 
         var catalog = local.getBean(ProviderCatalog.class);
         String key = "NSE_EQ|ZZ0000000002";
         var initial = new MarketDataProvider.Instrument("UPSTOX", key, "NSE", "NSE_EQ", "FIRST", "[redacted]",
-            "ZZ0000000002", MarketDataProvider.Segment.EQUITY, "UNKNOWN", null, null, null, null, null, 1L, null);
+            "ZZ0000000002", MarketDataProvider.Segment.EQUITY, "UNKNOWN", null, null, null, null, null, 1L, null, null, null, null, null);
         var renamed = new MarketDataProvider.Instrument("UPSTOX", key, "NSE", "NSE_EQ", "RENAMED", "[redacted]",
-            "ZZ0000000002", MarketDataProvider.Segment.EQUITY, "SUSPENDED", null, null, null, null, null, 1L, null);
+            "ZZ0000000002", MarketDataProvider.Segment.EQUITY, "SUSPENDED", null, null, null, null, null, 1L, null, null, null, null, null);
         owner.execute("GRANT SELECT, INSERT, UPDATE (instrument, synchronized_at) ON market_instrument_cache TO tape_runtime");
         catalog.synchronize(ownerId, "UPSTOX", List.of(initial));
         UUID id = owner.queryForObject("SELECT id FROM market_instrument_cache WHERE user_id=?", UUID.class, ownerId);

@@ -35,13 +35,14 @@ final class UpstoxMarketData implements MarketDataProvider, AutoCloseable {
     private final Transport transport;
     private final ObjectMapper json;
     private final Clock clock;
-    private final Semaphore inFlight = new Semaphore(4);
+    private final Semaphore inFlight = new Semaphore(8);
     private final Deque<Instant> calls = new ArrayDeque<>();
     private Instant credentialRejectedUntil = Instant.MIN;
     private Instant blockedUntil = Instant.MIN;
     private final boolean configured;
     private final UpstoxQuoteStream stream;
     private final Map<String, ExchangeStatus> sessions = new java.util.concurrent.ConcurrentHashMap<>();
+    private final Map<String, Session> calendars = new java.util.concurrent.ConcurrentHashMap<>();
 
     private record ExchangeStatus(String status, Instant received) {}
 
@@ -66,6 +67,7 @@ final class UpstoxMarketData implements MarketDataProvider, AutoCloseable {
     @Override public void close() { stream.close(); }
 
     @Override public Stream stream(String key) { return stream.read(key); }
+    @Override public Streams streams(Set<String> keys) { return stream.read(keys); }
 
     private static Transport http(String token) {
         var client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(3))
@@ -123,7 +125,7 @@ final class UpstoxMarketData implements MarketDataProvider, AutoCloseable {
         };
         String match = expiry == null ? "" : "&expiry=" + expiry;
         var root = get("/v2/instruments/search?query=" + encode(query) + "&segments=" + filter +
-            "&exchanges=" + encode(exchange.isEmpty() && segment == Segment.EQUITY ? "NSE,BSE" : exchange.isEmpty() ? "NSE" : exchange) +
+            "&exchanges=" + encode(exchange.isEmpty() ? (segment == Segment.EQUITY || segment == Segment.INDEX ? "NSE,BSE" : "NSE") : exchange) +
             "&page_number=" + page + "&records=20" + match);
         var items = instruments(root.path("data")).stream().filter(i -> i.type() == segment)
             .filter(i -> exchange.isEmpty() || exchange.equals(i.exchange()))
@@ -138,7 +140,7 @@ final class UpstoxMarketData implements MarketDataProvider, AutoCloseable {
         for (var entry : response.properties()) {
             var row = entry.getValue();
             String token = str(row, "instrument_token");
-            boolean indexKeyMatches = token == null && key.startsWith("NSE_INDEX|") &&
+            boolean indexKeyMatches = token == null && (key.startsWith("NSE_INDEX|") || key.startsWith("BSE_INDEX|")) &&
                 entry.getKey().equals(key.replace('|', ':'));
             if (!key.equals(token) && !indexKeyMatches) continue;
             BigDecimal last = positive(row.get("last_price"));
@@ -180,7 +182,16 @@ final class UpstoxMarketData implements MarketDataProvider, AutoCloseable {
     @Override public History candles(String key, Interval interval, LocalDate from, LocalDate to) {
         var data = get("/v3/historical-candle/" + encode(key) + "/" + interval.path + "/" + to + "/" + from)
             .path("data").path("candles");
-        Instant received = clock.instant();
+        return history(key, interval, from, to, data, clock.instant());
+    }
+
+    @Override public History intraday(String key, Interval interval) {
+        var today = LocalDate.now(clock.withZone(IST));
+        var data = get("/v3/historical-candle/intraday/" + encode(key) + "/" + interval.path).path("data").path("candles");
+        return history(key, interval, today, today, data, clock.instant());
+    }
+
+    private History history(String key, Interval interval, LocalDate from, LocalDate to, JsonNode data, Instant received) {
         Map<Instant, Candle> bars = new TreeMap<>();
         for (var row : array(data)) {
             if (!row.isArray() || row.size() < 5) continue;
@@ -201,6 +212,35 @@ final class UpstoxMarketData implements MarketDataProvider, AutoCloseable {
         return new History(source(), exchange(key), key, received, interval, List.copyOf(bars.values()));
     }
 
+    @Override public Session session(String exchange, LocalDate date) {
+        var cached = calendars.get(exchange);
+        if (cached == null || !date.equals(cached.date())) {
+            String holiday = null;
+            boolean closed = false;
+            for (var entry : array(get("/v2/market/holidays/" + date).path("data"))) {
+                if (!date.equals(date(entry.get("date"))) || "SETTLEMENT_HOLIDAY".equals(str(entry, "holiday_type"))) continue;
+                closed |= entry.path("closed_exchanges").valueStream().anyMatch(node -> exchange.equals(node.asText()));
+                if (closed || entry.path("open_exchanges").valueStream().anyMatch(row -> exchange.equals(str(row, "exchange"))))
+                    holiday = str(entry, "description");
+            }
+            var rows = closed ? List.<TradingWindow>of() :
+                array(get("/v2/market/timings/" + date).path("data")).valueStream()
+                    .filter(row -> exchange.equals(str(row, "exchange")))
+                    .map(row -> new TradingWindow(epoch(row.get("start_time")), epoch(row.get("end_time"))))
+                    .filter(window -> window.opensAt() != null && window.closesAt() != null &&
+                        window.opensAt().isBefore(window.closesAt()) && date.equals(window.opensAt().atZone(IST).toLocalDate()))
+                    .distinct().sorted(java.util.Comparator.comparing(TradingWindow::opensAt)).toList();
+            cached = new Session(source(), exchange, date, closed ? "HOLIDAY" : "UNKNOWN", holiday, rows);
+            calendars.put(exchange, cached);
+        }
+        var now = clock.instant();
+        var windows = cached.windows();
+        String phase = windows.stream().anyMatch(row -> !now.isBefore(row.opensAt()) && now.isBefore(row.closesAt())) ? "OPEN" :
+            windows.stream().anyMatch(row -> now.isBefore(row.opensAt())) ? "UPCOMING" :
+                windows.isEmpty() ? cached.status() : "CLOSED";
+        return new Session(source(), exchange, date, phase, cached.holiday(), windows);
+    }
+
     @Override public List<Instrument> options(String underlying, LocalDate expiry) {
         String extra = expiry == null ? "" : "&expiry_date=" + expiry;
         return instruments(get("/v2/option/contract?instrument_key=" + encode(underlying) + extra).path("data")).stream()
@@ -215,7 +255,8 @@ final class UpstoxMarketData implements MarketDataProvider, AutoCloseable {
             if (!underlying.equals(str(row, "underlying_key")) || !expiry.equals(date(row.get("expiry")))) continue;
             var strike = positive(row.get("strike_price"));
             if (strike == null) continue;
-            strikes.putIfAbsent(strike, new Strike(strike, leg(row.path("call_options")), leg(row.path("put_options"))));
+            strikes.putIfAbsent(strike, new Strike(strike, leg(row.path("call_options")), leg(row.path("put_options")),
+                positive(row.get("underlying_spot_price")), number(row.get("pcr"))));
         }
         return new Chain(source(), exchange(underlying), underlying, expiry, clock.instant(), List.copyOf(strikes.values()));
     }
@@ -224,8 +265,12 @@ final class UpstoxMarketData implements MarketDataProvider, AutoCloseable {
         String key = str(node, "instrument_key");
         if (!validKey(key) || !key.startsWith("NSE_FO|")) return null;
         var data = node.path("market_data");
+        var greeks = node.path("option_greeks");
         return new Leg(key, positive(data.get("ltp")), count(data.get("volume")), count(data.get("oi")),
-            positive(data.get("bid_price")), positive(data.get("ask_price")));
+            positive(data.get("bid_price")), positive(data.get("ask_price")), count(data.get("bid_qty")),
+            count(data.get("ask_qty")), positive(data.get("close_price")), count(data.get("prev_oi")),
+            greeks.isObject() ? new Greeks(number(greeks.get("iv")), number(greeks.get("delta")), number(greeks.get("gamma")),
+                number(greeks.get("theta")), number(greeks.get("vega")), number(greeks.get("pop"))) : null);
     }
 
     List<Instrument> instruments(JsonNode rows) {
@@ -239,7 +284,7 @@ final class UpstoxMarketData implements MarketDataProvider, AutoCloseable {
         String kind = str(row, "instrument_type");
         Segment type = switch (segment) {
             case "NSE_EQ", "BSE_EQ" -> Segment.EQUITY;
-            case "NSE_INDEX" -> Segment.INDEX;
+            case "NSE_INDEX", "BSE_INDEX" -> Segment.INDEX;
             default -> "FUT".equals(kind) ? Segment.FUTURES : Set.of("CE", "PE").contains(Objects.toString(kind, "")) ? Segment.OPTIONS : null;
         };
         if (type == null) return null;
@@ -255,7 +300,9 @@ final class UpstoxMarketData implements MarketDataProvider, AutoCloseable {
         if (expiry != null && expiry.isBefore(LocalDate.now(clock.withZone(IST)))) status = "EXPIRED";
         if (status == null || !Set.of("ACTIVE", "INACTIVE", "SUSPENDED", "DELISTED", "EXPIRED").contains(status)) status = "UNKNOWN";
         return new Instrument(source(), key, exchange(key), segment, symbol, str(row, "name"), str(row, "isin"), type,
-            status, expiry, underlying, underlyingType, strike, type == Segment.OPTIONS ? kind : null, lot, positive(row.get("tick_size")));
+            status, expiry, underlying, underlyingType, strike, type == Segment.OPTIONS ? kind : null, lot, positive(row.get("tick_size")),
+            positive(row.get("qty_multiplier")), count(row.get("minimum_lot")), count(row.get("freeze_quantity")),
+            row.path("weekly").isBoolean() ? row.get("weekly").booleanValue() : null);
     }
 
     URI authorizeStream() {
@@ -331,7 +378,7 @@ final class UpstoxMarketData implements MarketDataProvider, AutoCloseable {
         if (until.isAfter(blockedUntil)) blockedUntil = until;
     }
 
-    private static long retrySeconds(String header, Instant now) {
+    static long retrySeconds(String header, Instant now) {
         try { return Math.clamp(Long.parseLong(header.strip()), 2, 1800); }
         catch (NumberFormatException e) {
             try {

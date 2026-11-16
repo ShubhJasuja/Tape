@@ -7,7 +7,10 @@ import org.springframework.core.env.Profiles;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Component;
 
+import java.time.Duration;
+import java.time.Instant;
 import java.time.LocalDate;
+import java.time.format.DateTimeParseException;
 import java.util.Arrays;
 import java.util.Set;
 import java.util.Locale;
@@ -23,19 +26,42 @@ final class MarketDataAccess {
     private final Set<Capability> approved;
     private final boolean local;
     private final boolean configured;
+    private final Duration displayDelay;
+    private static final Set<Capability> INSTANT_DATA = Set.of(Capability.QUOTES, Capability.STREAM, Capability.OPTION_CHAIN,
+        Capability.INTRADAY);
 
     MarketDataAccess(Environment env) {
         local = env.acceptsProfiles(Profiles.of("accounts-local"));
         owner = env.getProperty("TAPE_MARKET_OWNER_ID", "").strip();
         String reference = env.getProperty("TAPE_MARKET_PERMISSION_REF", "").strip();
         String delay = env.getProperty("TAPE_MARKET_DISPLAY_DELAY", "").strip().toUpperCase(Locale.ROOT);
+        displayDelay = parseDelay(delay);
         approved = reference.isEmpty() || owner.isEmpty() || !local ? Set.of() :
             Arrays.stream(env.getProperty("TAPE_MARKET_PERMISSIONS", "").split(","))
                 .map(String::strip).filter(value -> !value.isEmpty()).map(Capability::valueOf)
-                .filter(capability -> "NONE".equals(delay) || !Set.of(Capability.QUOTES, Capability.HISTORY,
-                    Capability.STREAM, Capability.OPTION_CHAIN).contains(capability))
+                .filter(capability -> !INSTANT_DATA.contains(capability) || Duration.ZERO.equals(displayDelay))
+                .filter(capability -> capability != Capability.HISTORY || displayDelay != null)
                 .collect(Collectors.toUnmodifiableSet());
         configured = !env.getProperty("UPSTOX_ANALYTICS_TOKEN", "").isBlank();
+    }
+
+    private static Duration parseDelay(String value) {
+        if ("NONE".equals(value)) return Duration.ZERO;
+        try {
+            var delay = Duration.parse(value);
+            return delay.isPositive() && delay.compareTo(Duration.ofDays(36500)) <= 0 ? delay : null;
+        } catch (DateTimeParseException | ArithmeticException invalid) {
+            return null;
+        }
+    }
+
+    String displayDelay(UUID user) {
+        if (capabilities(user).isEmpty() || displayDelay == null) return null;
+        return displayDelay.isZero() ? "NONE" : displayDelay.toString();
+    }
+
+    LocalDate historyThrough(Instant now) {
+        return now.minus(displayDelay).atZone(UpstoxMarketData.IST).toLocalDate().minusDays(1);
     }
 
     Set<Capability> capabilities(UUID user) {
@@ -68,7 +94,7 @@ final class MarketDataAccess {
     }
 
     static String key(String key) {
-        if (key == null || !key.matches("(NSE_EQ|BSE_EQ|NSE_INDEX|NSE_FO)\\|[A-Za-z0-9 ._&-]{1,65}")) {
+        if (key == null || !key.matches("(NSE_EQ|BSE_EQ|NSE_INDEX|BSE_INDEX|NSE_FO)\\|[A-Za-z0-9 ._&-]{1,65}")) {
             throw invalid();
         }
         return key;
@@ -86,7 +112,7 @@ final class MarketDataAccess {
     }
 
     static String query(String q) {
-        if (q.length() > 80 || q.chars().anyMatch(Character::isISOControl)) throw invalid();
+        if (q.length() > 50 || q.chars().anyMatch(Character::isISOControl)) throw invalid();
         return q.strip();
     }
 

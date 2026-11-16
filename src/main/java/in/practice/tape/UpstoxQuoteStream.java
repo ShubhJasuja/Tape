@@ -14,7 +14,10 @@ import java.nio.ByteBuffer;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
@@ -52,14 +55,18 @@ final class UpstoxQuoteStream implements AutoCloseable {
         worker.scheduleWithFixedDelay(this::expire, 5, 5, java.util.concurrent.TimeUnit.SECONDS);
     }
 
-    synchronized MarketDataProvider.Stream read(String key) {
+    MarketDataProvider.Stream read(String key) {
+        var result = read(Set.of(key));
+        return new MarketDataProvider.Stream(result.status(), result.quotes().get(key));
+    }
+
+    synchronized MarketDataProvider.Streams read(Set<String> keys) {
         var now = clock.instant();
-        if (closed) return new MarketDataProvider.Stream("DISCONNECTED", null);
-        if (active == null || !active.key.equals(key)) {
-            disconnect();
-            active = new Session(key);
-        }
+        if (closed) return new MarketDataProvider.Streams("DISCONNECTED", Map.of());
+        if (active == null) active = new Session();
         Session session = active;
+        session.keys = Set.copyOf(keys);
+        session.ticks.keySet().retainAll(keys);
         session.demand = now;
         if (session.socket != null && (session.lastMessage.plus(IDLE).isBefore(now) ||
             (session.connecting && session.openedAt.plusSeconds(12).isBefore(now)))) {
@@ -71,15 +78,49 @@ final class UpstoxQuoteStream implements AutoCloseable {
             long attempt = ++session.attempt;
             worker.execute(() -> connect(session, attempt));
         }
-        var quote = session.tick == null || !"CONNECTED".equals(session.status) ? null :
-            quotes.create(key, session.tick.at, now, session.marketStatus, session.tick.last, session.tick.change);
-        if (quote != null) {
-            var received = session.tick.received;
-            quote = new MarketDataProvider.Quote(quote.source(), quote.exchange(), quote.key(), quote.exchangeAt(), session.tick.providerAt, received,
+        syncSubscriptions(session);
+        var result = new HashMap<String, MarketDataProvider.Quote>();
+        if ("CONNECTED".equals(session.status)) session.ticks.forEach((key, tick) -> {
+            var quote = quotes.create(key, tick.at, now, session.marketStatus.getOrDefault(segment(key), "UNKNOWN"), tick.last, tick.change);
+            result.put(key, new MarketDataProvider.Quote(quote.source(), quote.exchange(), quote.key(), quote.exchangeAt(),
+                tick.providerAt, tick.received,
                 quote.freshness(), quote.ageMillis(), quote.marketStatus(), quote.last(), quote.change(), quote.percentChange(),
-                null, null, null, null, null);
+                null, null, null, null, null));
+        });
+        return new MarketDataProvider.Streams(session.status, Map.copyOf(result));
+    }
+
+    // The JDK allows only one outstanding binary send on a socket.
+    private void syncSubscriptions(Session session) {
+        var socket = session.socket;
+        if (socket == null || session.sending) return;
+        var keys = new HashSet<>(session.subscribed);
+        keys.removeAll(session.keys);
+        boolean remove = !keys.isEmpty();
+        if (!remove) {
+            keys.addAll(session.keys);
+            keys.removeAll(session.subscribed);
         }
-        return new MarketDataProvider.Stream(session.status, quote);
+        if (keys.isEmpty()) return;
+        long attempt = session.attempt;
+        session.sending = true;
+        try {
+            var data = remove ? Map.of("instrumentKeys", keys) : Map.of("mode", "ltpc", "instrumentKeys", keys);
+            byte[] request = json.writeValueAsBytes(Map.of("guid", UUID.randomUUID().toString(),
+                "method", remove ? "unsub" : "sub", "data", data));
+            socket.sendBinary(ByteBuffer.wrap(request), true).orTimeout(8, java.util.concurrent.TimeUnit.SECONDS).whenComplete((ignored, error) -> {
+                synchronized (UpstoxQuoteStream.this) {
+                    if (active != session || session.socket != socket || session.attempt != attempt) return;
+                    if (error != null) { failed(session, attempt, "DISCONNECTED"); return; }
+                    if (remove) session.subscribed.removeAll(keys);
+                    else session.subscribed.addAll(keys);
+                    session.sending = false;
+                    syncSubscriptions(session);
+                }
+            });
+        } catch (IOException | RuntimeException e) {
+            failed(session, attempt, "DISCONNECTED");
+        }
     }
 
     private void connect(Session session, long attempt) {
@@ -91,14 +132,18 @@ final class UpstoxQuoteStream implements AutoCloseable {
             handshake.orTimeout(8, java.util.concurrent.TimeUnit.SECONDS).whenComplete((socket, error) -> {
                 if (error != null) {
                     var cause = error instanceof java.util.concurrent.CompletionException ? error.getCause() : error;
-                    String status = cause instanceof java.net.http.WebSocketHandshakeException rejected ?
-                        switch (rejected.getResponse().statusCode()) {
+                    if (cause instanceof java.net.http.WebSocketHandshakeException rejected) {
+                        var response = rejected.getResponse();
+                        String status = switch (response.statusCode()) {
                             case 401 -> "MARKET_STREAM_AUTH_FAILED";
                             case 403 -> "MARKET_PROVIDER_FORBIDDEN";
                             case 429 -> "MARKET_RATE_LIMITED";
                             default -> "DISCONNECTED";
-                        } : "DISCONNECTED";
-                    failed(session, attempt, status);
+                        };
+                        long retryAfter = response.statusCode() == 429 ?
+                            UpstoxMarketData.retrySeconds(response.headers().firstValue("Retry-After").orElse(""), clock.instant()) : 0;
+                        failed(session, attempt, status, retryAfter);
+                    } else failed(session, attempt, "DISCONNECTED");
                 }
             });
         } catch (MarketDataAccess.Rejected e) {
@@ -118,19 +163,23 @@ final class UpstoxQuoteStream implements AutoCloseable {
         if (old != null && old.socket != null) old.socket.abort();
     }
 
-    private synchronized void failed(Session session, long attempt, String status) {
+    private void failed(Session session, long attempt, String status) { failed(session, attempt, status, 0); }
+
+    private synchronized void failed(Session session, long attempt, String status, long retryAfter) {
         if (active != session || session.attempt != attempt || (!session.connecting && session.socket == null)) return;
         var socket = session.socket;
         session.socket = null;
         session.connecting = false;
-        session.tick = null;
-        session.marketStatus = "UNKNOWN";
+        session.ticks.clear();
+        session.marketStatus.clear();
+        session.subscribed.clear();
+        session.sending = false;
         session.status = status;
         long wait = switch (status) {
             case "MARKET_AUTH_FAILED", "MARKET_STREAM_AUTH_FAILED", "MARKET_PROVIDER_FORBIDDEN", "MARKET_RATE_LIMITED" -> 60;
             default -> Math.min(30, 1L << Math.min(5, ++session.failures));
         };
-        session.retryAt = clock.instant().plusSeconds(wait);
+        session.retryAt = clock.instant().plusSeconds(Math.max(wait, retryAfter));
         session.frame.reset();
         if (socket != null) socket.abort();
     }
@@ -142,17 +191,17 @@ final class UpstoxQuoteStream implements AutoCloseable {
     }
 
     private final class Session {
-        final String key;
         final ByteArrayOutputStream frame = new ByteArrayOutputStream();
+        Set<String> keys = Set.of();
+        final Set<String> subscribed = new HashSet<>();
+        final Map<String, Tick> ticks = new HashMap<>();
+        final Map<String, String> marketStatus = new HashMap<>();
         WebSocket socket;
         Instant retryAt = Instant.MIN, demand = clock.instant(), lastMessage = demand, openedAt = demand;
-        boolean connecting;
+        boolean connecting, sending;
         int failures;
         long attempt;
-        String status = "DISCONNECTED", marketStatus = "UNKNOWN";
-        Tick tick;
-
-        Session(String key) { this.key = key; }
+        String status = "DISCONNECTED";
     }
 
     private final class Attempt implements WebSocket.Listener {
@@ -168,14 +217,7 @@ final class UpstoxQuoteStream implements AutoCloseable {
                 if (closed || active != session || session.attempt != id || !session.connecting) { ws.abort(); return; }
                 session.socket = ws;
                 session.lastMessage = session.openedAt = clock.instant();
-                try {
-                    byte[] request = json.writeValueAsBytes(Map.of("guid", UUID.randomUUID().toString(), "method", "sub",
-                        "data", Map.of("mode", "ltpc", "instrumentKeys", java.util.List.of(session.key))));
-                    ws.sendBinary(ByteBuffer.wrap(request), true)
-                        .whenComplete((ignored, error) -> { if (error != null) failed(session, id, "DISCONNECTED"); });
-                } catch (IOException e) {
-                    failed(session, id, "DISCONNECTED");
-                }
+                syncSubscriptions(session);
                 if (current(ws)) ws.request(1);
             }
         }
@@ -191,13 +233,12 @@ final class UpstoxQuoteStream implements AutoCloseable {
                 if (last) {
                     try {
                         var received = clock.instant();
-                        var update = decode(frame.toByteArray(), session.key, received);
-                        if (update.marketStatus != null) session.marketStatus = update.marketStatus;
-                        if (update.tick != null && (session.tick == null || !update.tick.at.isBefore(session.tick.at))) {
-                            session.tick = update.tick;
-                            session.failures = 0;
-                        }
-                        if (update.marketStatus != null || update.tick != null) {
+                        var update = decode(frame.toByteArray(), session.keys, received);
+                        session.marketStatus.putAll(update.marketStatus);
+                        update.ticks.forEach((key, tick) -> session.ticks.merge(key, tick, (prior, next) ->
+                            next.at.isBefore(prior.at) ? prior : next));
+                        if (!update.ticks.isEmpty()) session.failures = 0;
+                        if (!update.marketStatus.isEmpty() || !update.ticks.isEmpty()) {
                             session.lastMessage = received;
                             session.connecting = false;
                             session.status = "CONNECTED";
@@ -230,14 +271,14 @@ final class UpstoxQuoteStream implements AutoCloseable {
     }
 
     record Tick(Instant at, Instant providerAt, Instant received, BigDecimal last, BigDecimal change) {}
-    record Update(Tick tick, String marketStatus) {}
+    record Update(Map<String, Tick> ticks, Map<String, String> marketStatus) {}
 
     // Only the documented FeedResponse/Feed/LTPC and segment-status fields are read.
-    static Update decode(byte[] bytes, String key, Instant received) throws IOException {
+    static Update decode(byte[] bytes, Set<String> keys, Instant received) throws IOException {
         var input = CodedInputStream.newInstance(bytes);
-        Tick quote = null;
+        var ticks = new HashMap<String, Tick>();
         Instant providerAt = null;
-        String status = null;
+        Map<String, String> status = Map.of();
         for (int tag; (tag = input.readTag()) != 0;) {
             if (tag == 18) {
                 var entry = CodedInputStream.newInstance(input.readByteArray());
@@ -248,14 +289,22 @@ final class UpstoxQuoteStream implements AutoCloseable {
                     else if (field == 18) value = entry.readByteArray();
                     else entry.skipField(field);
                 }
-                if (key.equals(found) && value != null) quote = tick(value, received);
+                if (found != null && keys.contains(found) && value != null) {
+                    var quote = tick(value, received);
+                    if (quote != null) ticks.put(found, quote);
+                }
             } else if (tag == 24) {
                 providerAt = wireTime(input.readInt64());
             } else if (tag == 34) {
-                status = marketStatus(input.readByteArray(), key.substring(0, key.indexOf('|')));
+                status = marketStatus(input.readByteArray());
+                var segments = new HashSet<String>();
+                keys.forEach(key -> segments.add(segment(key)));
+                status.keySet().retainAll(segments);
             } else input.skipField(tag);
         }
-        return new Update(quote == null ? null : new Tick(quote.at, providerAt, received, quote.last, quote.change), status);
+        Instant providerTime = providerAt;
+        ticks.replaceAll((key, quote) -> new Tick(quote.at, providerTime, received, quote.last, quote.change));
+        return new Update(ticks, status);
     }
 
     private static Tick tick(byte[] bytes, Instant received) throws IOException {
@@ -284,8 +333,11 @@ final class UpstoxQuoteStream implements AutoCloseable {
         return millis >= 946684800000L && millis < 7258118400000L ? Instant.ofEpochMilli(millis) : null;
     }
 
-    private static String marketStatus(byte[] bytes, String segment) throws IOException {
+    private static String segment(String key) { return key.substring(0, key.indexOf('|')); }
+
+    private static Map<String, String> marketStatus(byte[] bytes) throws IOException {
         var input = CodedInputStream.newInstance(bytes);
+        var statuses = new HashMap<String, String>();
         for (int tag; (tag = input.readTag()) != 0;) {
             if (tag != 10) { input.skipField(tag); continue; }
             var entry = CodedInputStream.newInstance(input.readByteArray());
@@ -296,7 +348,7 @@ final class UpstoxQuoteStream implements AutoCloseable {
                 else if (field == 16) status = entry.readEnum();
                 else entry.skipField(field);
             }
-            if (segment.equals(key)) return switch (status) {
+            if (key != null) statuses.put(key, switch (status) {
                 case 0 -> "PRE_OPEN_START";
                 case 1 -> "PRE_OPEN_END";
                 case 2 -> "NORMAL_OPEN";
@@ -304,8 +356,8 @@ final class UpstoxQuoteStream implements AutoCloseable {
                 case 4 -> "CLOSING_START";
                 case 5 -> "CLOSING_END";
                 default -> "UNKNOWN";
-            };
+            });
         }
-        return null;
+        return statuses;
     }
 }

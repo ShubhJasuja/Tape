@@ -68,7 +68,7 @@ class ProviderCatalog {
             if (i.expiry() != null && i.expiry().isBefore(LocalDate.now(Clock.system(UpstoxMarketData.IST)))) {
                 return new MarketDataProvider.Instrument(i.source(), i.key(), i.exchange(), i.segment(), i.symbol(), i.name(),
                     i.isin(), i.type(), "EXPIRED", i.expiry(), i.underlyingKey(), i.underlyingType(), i.strike(), i.side(),
-                    i.lotSize(), i.tickSizePaise());
+                    i.lotSize(), i.tickSizePaise(), i.quantityMultiplier(), i.minimumLot(), i.freezeQuantity(), i.weekly());
             }
             return i;
         } catch (JsonProcessingException e) {

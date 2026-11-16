@@ -8,6 +8,14 @@
 .market-data-grid .stock strong { overflow-wrap: anywhere; }
 .market-data-grid .chart { min-width: 0; }
 .market-data-grid .chart-title h2 { overflow-wrap: anywhere; }
+.provider-segments { display: flex; flex-wrap: wrap; gap: 4px; padding: 0 10px 8px; }
+.provider-segments button, .provider-chart-tabs button { min-height: 32px; white-space: nowrap; }
+.provider-segments button { flex: 1 0 auto; padding: 4px; background: transparent; border-color: transparent; }
+.provider-segments button[aria-pressed="true"], .provider-chart-tabs button[aria-pressed="true"] {
+  color: var(--ink);
+  text-decoration: underline var(--blue);
+  text-underline-offset: 5px;
+}
 .provider-stamp { padding: 8px 14px; font-size: 12px; overflow-wrap: anywhere; }
 .provider-ohlc { display: flex; flex-wrap: wrap; gap: 10px 18px; padding: 8px 14px; }
 .provider-ohlc dt { color: var(--muted); }
@@ -15,6 +23,11 @@
 .provider-pins { padding: 10px; display: grid; gap: 5px; }
 .provider-pins > div { display: flex; justify-content: space-between; gap: 4px; }
 .provider-pins div > button:first-child { overflow-wrap: anywhere; text-align: left; }
+.provider-watchlist-form { display: flex; gap: 4px; }
+.provider-watchlist-form input, .provider-pins select { min-width: 0; flex: 1; }
+.provider-watchlist-form input { margin: 0; }
+.provider-pin { align-items: center; }
+.provider-pin .mono { font-size: 12px; white-space: nowrap; }
 .provider-chain { margin-top: 16px; }
 .contract-controls label { display: grid; gap: 4px; }
 .contract-controls input { background: var(--control); border: 1px solid var(--line); padding: 4px 7px; width: 120px; }
@@ -22,6 +35,9 @@
 .provider-table th, .provider-table td { text-align: right; font-variant-numeric: tabular-nums; }
 .provider-table thead th[colspan] { text-align: center; }
 .provider-table tbody th { color: var(--ink); }
+.provider-table tbody th small { display: block; white-space: nowrap; }
+.provider-table td .quiet { padding: 3px 4px; }
+.provider-chart-tabs { flex-wrap: wrap; }
 @media (max-width: 800px) {
   .market-data-grid { grid-template-columns: minmax(0, 1fr); }
   .market-data-grid .chart { grid-column: 1; grid-row: 2; }
