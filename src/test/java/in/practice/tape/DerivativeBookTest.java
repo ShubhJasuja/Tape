@@ -415,12 +415,209 @@ class DerivativeBookTest {
         DerivativeBook.AccountState state() { return options.reconcile(owner, account); }
     }
 
+    @Test
+    void futuresPostOnlyVariationAndFeesAndAllocateBasisOnPartialCloses() {
+        var session = practice(true);
+        var chain = session.options.view(session.owner, session.account, 0).chain().stream()
+            .filter(item -> item.expiry().isAfter(Instant.parse("2027-01-01T00:00:00Z"))).toList();
+        var longContract = chain.get(0);
+        var shortContract = chain.get(1);
+        code("INVALID_TICK", () -> session.place(longContract, PracticeOptions.Side.BUY, 1, 100_001L));
+        code("POSITION_LIMIT", () -> session.place(longContract, PracticeOptions.Side.BUY, 11, null));
+        var buy = session.place(longContract, PracticeOptions.Side.BUY, 3, null);
+        var sell = session.place(shortContract, PracticeOptions.Side.SELL, 2, null);
+        long units = longContract.lotSize() * longContract.multiplier();
+        assertEquals(0, buy.premiumPaise());
+        assertEquals(0, sell.premiumPaise());
+        assertEquals(99_999_600, session.state().wallet().cash());
+        assertEquals(1_000_000, session.state().wallet().collateral());
+        var resting = session.place(longContract, PracticeOptions.Side.BUY, 1, buy.fillPaise() - longContract.tickPaise());
+        assertEquals("OPEN", resting.status());
+        assertEquals(200_200, session.state().wallet().reserved());
+        assertEquals("CANCELLED", session.options.cancel(session.owner, session.account, resting.id()).status());
+        assertEquals(0, session.state().wallet().reserved());
+        now = START.plusSeconds(40);
+        var view = session.options.view(session.owner, session.account, 0);
+        assertEquals((view.positions().getFirst().markPaise() - buy.fillPaise()) * units * 3, view.positions().getFirst().unrealizedPaise());
+        var reduce = session.place(longContract, PracticeOptions.Side.SELL, 1, null);
+        var cover = session.place(shortContract, PracticeOptions.Side.BUY, 1, null);
+        assertEquals((reduce.fillPaise() - buy.fillPaise()) * units - 200, reduce.realizedPaise());
+        assertEquals((sell.fillPaise() - cover.fillPaise()) * units - 200, cover.realizedPaise());
+        assertEquals(2, session.state().positions().get(longContract.id()).lots());
+        assertEquals(-1, session.state().positions().get(shortContract.id()).lots());
+        assertEquals(600_000, session.state().wallet().collateral());
+        code("REDUCTION_REQUIRED", () -> session.options.submit(session.owner, session.account,
+            new PracticeOptions.Ticket(UUID.randomUUID(), longContract.id(), 1, PracticeOptions.Side.SELL, 3, null, true)));
+        session.options.submit(session.owner, session.account,
+            new PracticeOptions.Ticket(UUID.randomUUID(), longContract.id(), 1, PracticeOptions.Side.SELL, 2, null, true));
+        assertFalse(session.state().positions().containsKey(longContract.id()));
+    }
+
+    @Test
+    void futuresFillAtScheduledMarkUsesJournalSequence() {
+        var session = practice(true);
+        LocalDate day = LocalDate.of(2026, 1, 5);
+        var future = shortDatedFuture(day.plusDays(7), 200_000, 150_000);
+        var listing = futureListing(session, future);
+        session.place(listing, PracticeOptions.Side.BUY, 2, null);
+
+        now = close(day);
+        assertEquals("FILLED", session.place(listing, PracticeOptions.Side.SELL, 1, null).status());
+        var view = session.options.view(session.owner, session.account, 0);
+        var atClose = view.journal().stream().filter(event -> now.equals(event.occurredAt())).toList();
+        assertEquals(java.util.List.of("FILL", "MARK"), atClose.stream().map(event -> event.kind()).toList());
+        session.options.reconcile(session.owner, session.account);
+    }
+
+    @Test
+    void futuresRecoverMissedDailyMarksAndSettleOnceWithOrderExpiry() {
+        var session = practice(true);
+        LocalDate day = LocalDate.of(2026, 1, 5);
+        var future = shortDatedFuture(day.plusDays(3), 200_000, 150_000);
+        var listing = futureListing(session, future);
+        var entry = session.place(listing, PracticeOptions.Side.SELL, 2, null);
+        var resting = session.place(listing, PracticeOptions.Side.BUY, 1, listing.tickPaise());
+        assertEquals("OPEN", resting.status());
+        now = close(day.plusDays(1)).plusSeconds(1);
+        var restart = new PracticeFutures(db, tx, bookClock(), true, 200, true);
+        assertTrue(restart.view(session.owner, session.account, 0).marksPending());
+        var ready = restart.dueFutures(null).stream().filter(work -> work.account().equals(session.account)).findFirst().orElseThrow();
+        restart.markFutures(ready);
+        restart.markFutures(ready);
+        var marked = restart.view(session.owner, session.account, 0);
+        assertFalse(marked.marksPending());
+        assertEquals(2, marked.journal().stream().filter(post -> post.kind().equals("MARK")).count());
+        var last = marked.journal().getFirst();
+        assertEquals(close(day.plusDays(1)), last.occurredAt());
+        assertEquals(100_000_000 - 200 + (entry.fillPaise() - last.pricePaise()) * 40, marked.balances().cashPaise());
+
+        now = future.expiry();
+        restart.markFutures(ready);
+        restart.markFutures(ready);
+        var settled = restart.view(session.owner, session.account, 0);
+        assertEquals(1, settled.settlements().size());
+        assertEquals(3, settled.journal().stream().filter(post -> post.kind().equals("MARK")).count());
+        assertEquals("EXPIRED", settled.orders().stream().filter(order -> order.id().equals(resting.id())).findFirst().orElseThrow().status());
+        assertTrue(settled.positions().isEmpty());
+        assertEquals(0, settled.balances().marginPaise());
+        assertEquals(0, settled.balances().reservedPaise());
+        assertEquals(100_000_000 - 200 + (entry.fillPaise() - PracticeOptionPrices.underlying(now)) * 40,
+            settled.balances().cashPaise());
+        code("CONTRACT_NOT_ACTIVE", () -> session.place(listing, PracticeOptions.Side.BUY, 1, null));
+        restart.reconcile(session.owner, session.account);
+    }
+
+    @Test
+    void realizedVariationCanCauseShortfallAndBlocksNewRiskButAllowsReducing() {
+        var session = practice(true);
+        LocalDate day = LocalDate.of(2026, 1, 5);
+        var future = shortDatedFuture(day.plusDays(4), 1_000, 800);
+        var spec = catalog.version(future.id(), 1);
+        long closePrice = PracticeFutures.quote(spec, close(day));
+        var direction = PracticeOptionPrices.underlying(close(day)) < 100_000 ? PracticeOptions.Side.BUY : PracticeOptions.Side.SELL;
+        for (int i = 0; i < 80; i++) {
+            long move = PracticeFutures.quote(spec, now) - closePrice;
+            if (direction == PracticeOptions.Side.BUY ? move >= 1000 : move <= -1000) break;
+            now = now.plusSeconds(5);
+        }
+        var listing = futureListing(session, future);
+        book.open(session.owner, session.account, UUID.randomUUID(), 2400);
+        code("INSUFFICIENT_MARGIN", () -> session.place(listing, direction, 3, null));
+        session.place(listing, direction, 2, null);
+        now = close(day).plusSeconds(1);
+        var work = new PracticeOptions.Work(session.owner, session.account, session.account);
+        session.options.markFutures(work);
+        assertTrue(session.options.view(session.owner, session.account, 0).balances().maintenanceShortfallPaise() > 0);
+        code("INSUFFICIENT_MARGIN", () -> session.place(listing, direction, 1, null));
+        var reverse = direction == PracticeOptions.Side.BUY ? PracticeOptions.Side.SELL : PracticeOptions.Side.BUY;
+        session.options.submit(session.owner, session.account,
+            new PracticeOptions.Ticket(UUID.randomUUID(), listing.id(), 1, reverse, 1, null, true));
+        assertEquals(1, Math.abs(session.state().positions().get(listing.id()).lots()));
+        assertEquals(1000, session.state().wallet().collateral());
+    }
+
+    @Test
+    void optionsRiskCheckPostsDueFuturesMarksBeforeItSpendsSharedCash() {
+        var session = practice(true);
+        LocalDate day = LocalDate.of(2026, 1, 5);
+        var future = shortDatedFuture(day.plusDays(5), 200_000, 150_000);
+        session.place(futureListing(session, future), PracticeOptions.Side.BUY, 1, null);
+        var options = new PracticeOptions(db, tx, bookClock(), true, 200);
+        var call = listed(new Practice(session.owner, session.account, options), Kind.CALL);
+        now = close(day).plusSeconds(1);
+        options.submit(session.owner, session.account, new PracticeOptions.Ticket(UUID.randomUUID(), call.id(), 1,
+            PracticeOptions.Side.BUY, 1, null));
+        assertEquals("MARK", session.options.view(session.owner, session.account, 0).journal().getFirst().kind());
+        assertEquals(2, session.state().positions().size());
+    }
+
+    @Test
+    void futuresConcurrentOrdersAndCancellationShareOneAccountLock() throws Exception {
+        var session = practice(true);
+        var listing = session.options.view(session.owner, session.account, 0).chain().getFirst();
+        var side = PracticeOptions.Side.BUY;
+        var ticket = new PracticeOptions.Ticket(UUID.randomUUID(), listing.id(), 1, side, 1, null);
+        var pool = Executors.newFixedThreadPool(3);
+        try {
+            var start = new CountDownLatch(1);
+            var first = pool.submit(() -> { start.await(); return session.options.submit(session.owner, session.account, ticket); });
+            var retry = pool.submit(() -> { start.await(); return session.options.submit(session.owner, session.account, ticket); });
+            var another = pool.submit(() -> { start.await(); return session.place(listing, side, 1, null); });
+            start.countDown();
+            assertEquals(first.get(10, TimeUnit.SECONDS), retry.get(10, TimeUnit.SECONDS));
+            another.get(10, TimeUnit.SECONDS);
+            assertEquals(2, session.state().positions().get(listing.id()).lots());
+            var spec = catalog.version(listing.id(), 1);
+            while (PracticeFutures.quote(spec, now) == PracticeFutures.quote(spec, now.plusSeconds(5))) now = now.plusSeconds(5);
+            long current = PracticeFutures.quote(spec, now), next = PracticeFutures.quote(spec, now.plusSeconds(5));
+            var pending = session.place(listing, current > next ? PracticeOptions.Side.BUY : PracticeOptions.Side.SELL, 1, next);
+            assertEquals("OPEN", pending.status());
+            assertEquals(pending.reservationPaise(), session.state().wallet().reserved());
+            code("ACCOUNT_NOT_FOUND", () -> session.options.cancel(user, session.account, pending.id()));
+            now = now.plusSeconds(5);
+            var race = new CountDownLatch(1);
+            var match = pool.submit(() -> { race.await(); session.options.match(new PracticeOptions.Work(session.owner, session.account, pending.id())); return null; });
+            var cancel = pool.submit(() -> { race.await(); return session.options.cancel(session.owner, session.account, pending.id()); });
+            race.countDown();
+            match.get(10, TimeUnit.SECONDS);
+            var result = cancel.get(10, TimeUnit.SECONDS);
+            assertTrue(result.status().equals("FILLED") || result.status().equals("CANCELLED"));
+            assertEquals(0, session.state().wallet().reserved());
+            assertEquals(result.status().equals("FILLED") ? 1L : 0L, db.queryForObject(
+                "SELECT count(*) FROM derivative_events WHERE account_id=? AND request_id=?", Long.class, session.account, pending.id()));
+        } finally { pool.shutdownNow(); }
+    }
+
     private Practice practice() {
+        return practice(false);
+    }
+
+    private Practice practice(boolean futures) {
         UUID owner = UUID.randomUUID(), id = UUID.randomUUID();
         db.update("INSERT INTO users(id,identity_issuer,identity_subject) VALUES (?,'practice-test',?)", owner, owner.toString());
         db.update("INSERT INTO trading_accounts(id,user_id,mode,trading_enabled) VALUES (?,?,'DEMO',true)", id, owner);
-        return new Practice(owner, id, new PracticeOptions(db, tx, bookClock(), true, 200));
+        return new Practice(owner, id, futures ? new PracticeFutures(db, tx, bookClock(), true, 200, true)
+            : new PracticeOptions(db, tx, bookClock(), true, 200));
     }
+
+    private Contract shortDatedFuture(LocalDate expiry, long initial, long maintenance) {
+        UUID id = UUID.randomUUID();
+        var contract = new Contract(id, PracticeFutures.SOURCE, id.toString(), "NSE", PracticeOptionPrices.UNDERLYING,
+            Underlying.INDEX, Kind.FUTURE, close(expiry), 0, Settlement.CASH);
+        catalog.register(contract);
+        catalog.addSpec(new Spec(id, 1, START.minusSeconds(1), 10, 2, 5, initial, maintenance, 10, 25_000_000));
+        for (var day = LocalDate.of(2026, 1, 5); day.isBefore(expiry); day = day.plusDays(1)) {
+            db.update("INSERT INTO practice_future_sessions VALUES (?,?,?)", id, day, java.sql.Timestamp.from(close(day)));
+        }
+        return contract;
+    }
+
+    private PracticeOptions.Listing futureListing(Practice session, Contract contract) {
+        return session.options.view(session.owner, session.account, 0).chain().stream()
+            .filter(item -> item.id().equals(contract.id())).findFirst().orElseThrow();
+    }
+
+    private static Instant close(LocalDate day) { return day.atTime(15, 30).atZone(ZoneId.of("Asia/Kolkata")).toInstant(); }
 
     private PracticeOptions.Listing listed(Practice session, Kind kind) {
         return session.options.view(session.owner, session.account, 0).chain().stream()

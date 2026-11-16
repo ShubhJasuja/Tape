@@ -103,6 +103,10 @@ final class DerivativeBook {
     }
 
     Event fill(UUID owner, UUID account, UUID request, UUID contractId, long signedQuantity, long price, long fee) {
+        return fill(owner, account, request, contractId, signedQuantity, price, fee, null);
+    }
+
+    Event fill(UUID owner, UUID account, UUID request, UUID contractId, long signedQuantity, long price, long fee, Instant sampledAt) {
         return locked(owner, account, request, () -> {
             if (fee < 0) throw reject("INVALID_FEE");
             bounded(fee);
@@ -114,11 +118,12 @@ final class DerivativeBook {
                 }
                 return prior;
             }
-            Instant at = now();
+            Instant at = sampledAt == null ? now() : sampledAt;
+            validateTime(at);
             Contract contract = contracts.contract(contractId);
             Spec effective = contracts.effective(contractId, at);
             if (contract.status(at, effective) != Status.ACTIVE) throw reject("CONTRACT_NOT_ACTIVE");
-            requireChronology(account, contractId, at, false);
+            requireChronology(account, contractId, at, false, sampledAt != null);
             Position before = position(account, contractId);
             Spec spec = before.lots() == 0 ? effective : contracts.version(contractId, before.version());
             if (signedQuantity == 0 || signedQuantity % spec.lotSize() != 0) throw reject("INVALID_LOT_SIZE");
@@ -164,7 +169,7 @@ final class DerivativeBook {
             if (prior != null) return prior;
             Contract contract = contracts.contract(contractId);
             validateTime(markAt);
-            requireChronology(account, contractId, markAt, true);
+            requireChronology(account, contractId, markAt, true, false);
             if (contract.kind() != Kind.FUTURE || !markAt.isBefore(contract.expiry()) ||
                 !markAt.atZone(INDIA).toLocalDate().equals(session) || price <= 0) throw reject("INVALID_MARK");
             Position before = position(account, contractId);
@@ -187,7 +192,7 @@ final class DerivativeBook {
             var prior = previousLifecycle(account, request, contractId, "SETTLE", day, expiry, finalPrice);
             if (prior != null) return prior;
             validateTime(expiry);
-            requireChronology(account, contractId, expiry, false);
+            requireChronology(account, contractId, expiry, false, false);
             if (finalPrice <= 0) throw reject("INVALID_SETTLEMENT_PRICE");
             bounded(finalPrice);
             Wallet book = wallet(account);
@@ -325,12 +330,13 @@ final class DerivativeBook {
         return prior;
     }
 
-    private void requireChronology(UUID account, UUID contract, Instant at, boolean mark) {
+    private void requireChronology(UUID account, UUID contract, Instant at, boolean mark, boolean sampledFill) {
         var prior = db.query("""
             SELECT * FROM derivative_events WHERE account_id=? AND contract_id=? ORDER BY seq DESC LIMIT 1
             """, EVENT, account, contract).stream().findFirst().orElse(null);
         if (prior != null && ("SETTLE".equals(prior.kind()) || at.isBefore(prior.occurredAt()) ||
-            ((mark || "MARK".equals(prior.kind())) && at.equals(prior.occurredAt())))) throw reject("INVALID_EVENT_ORDER");
+            ((mark || (!sampledFill && "MARK".equals(prior.kind()))) && at.equals(prior.occurredAt()))))
+            throw reject("INVALID_EVENT_ORDER");
         if (mark) {
             var day = at.atZone(INDIA).toLocalDate();
             var latest = db.queryForObject("""

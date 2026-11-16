@@ -141,19 +141,22 @@ function AccountWorkspace({ user, restore, signOut, Terminal, Chart }) {
   const demo = accounts?.find(account => account.mode === 'DEMO');
   const showMarket = !!user && workspace === 'market';
   const showOptions = !!user && workspace === 'options';
+  const showFutures = !!user && workspace === 'futures';
+  const showDerivatives = showOptions || showFutures;
   return <>
     <header className="top account-top">
       <a className="brand" href="#workspace"><span className="brand-mark"><Activity size={23}/></span> Tape
         <span className="brand-sub">PAPER TRADING</span></a>
       {user && <nav className="tabs" aria-label="Workspace">
-        <button className={!showMarket && !showOptions ? 'selected' : ''} aria-pressed={!showMarket && !showOptions} onClick={() => setWorkspace('paper')}>Paper accounts</button>
+        <button className={!showMarket && !showDerivatives ? 'selected' : ''} aria-pressed={!showMarket && !showDerivatives} onClick={() => setWorkspace('paper')}>Paper accounts</button>
         <button className={showMarket ? 'selected' : ''} aria-pressed={showMarket} onClick={() => setWorkspace('market')}>Market data</button>
         <button className={showOptions ? 'selected' : ''} aria-pressed={showOptions} onClick={() => setWorkspace('options')}>Options practice</button>
+        <button className={showFutures ? 'selected' : ''} aria-pressed={showFutures} onClick={() => setWorkspace('futures')}>Futures practice</button>
       </nav>}
       {user && <div className="account-session"><span>{user.email}</span>
         <button className="quiet" onClick={logout} disabled={busy}>Sign out</button></div>}
     </header>
-    <main id={showOptions ? undefined : 'workspace'} className="account-page" hidden={showMarket || showOptions}>
+    <main id={showDerivatives ? undefined : 'workspace'} className="account-page" hidden={showMarket || showDerivatives}>
       <section className="panel account-panel" aria-labelledby="account-title">
         <h1 id="account-title">{user ? 'Your paper accounts' : registering ? 'Create your account' : 'Sign in to Tape'}</h1>
         {error && <p className="notice" role="alert">{error}</p>}
@@ -192,8 +195,8 @@ function AccountWorkspace({ user, restore, signOut, Terminal, Chart }) {
       </section>
     </main>
     {showMarket ? <MarketData signOut={signOut} Chart={Chart} /> :
-      showOptions ? (demo ?
-        <OptionsWorkspace key={demo.id} account={demo.id} read={request} write={write} signOut={signOut} /> :
+      showDerivatives ? (demo ?
+        <OptionsWorkspace key={`${demo.id}:${workspace}`} desk={workspace} account={demo.id} read={request} write={write} signOut={signOut} /> :
         <main id="workspace"><p role={error ? 'alert' : 'status'}>{error || (accounts ? 'No demo account is available.' : 'Loading your demo account…')}</p></main>) :
       active?.tradingEnabled && <Terminal key={active.id} demoAccount={active.id} sessionExpired={signOut} />}
   </>;

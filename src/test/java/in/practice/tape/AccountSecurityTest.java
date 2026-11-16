@@ -182,8 +182,7 @@ class AccountSecurityTest {
 
     @Test
     void practiceOptionsUseSessionCsrfOwnershipAndLeastPrivilege() throws Exception {
-        new ResourceDatabasePopulator(new FileSystemResource("docs/trading-runtime-grants.sql"),
-            new FileSystemResource("docs/options-runtime-grants.sql")).execute(owner.getDataSource());
+        grantDerivativeAccess();
         try (var app = startApplication(true, false, false, Map.of("tape.practice-options.enabled", true))) {
             var client = new Browser(app);
             var other = new Browser(app);
@@ -218,6 +217,41 @@ class AccountSecurityTest {
             assertThrows(org.springframework.dao.DataAccessException.class, () -> new JdbcTemplate(runtimeDataSource())
                 .update("UPDATE derivative_events SET cash_delta_paise=0"));
         }
+    }
+
+    @Test
+    void futuresHttpUsesExistingOwnershipAndCsrfAndRejectsOptionContracts() throws Exception {
+        grantDerivativeAccess();
+        try (var app = startApplication(true, false, false,
+            Map.of("tape.practice-options.enabled", true, "tape.practice-futures.enabled", true))) {
+            String email = email();
+            var client = new Browser(app);
+            assertEquals(201, client.register(email).statusCode());
+            assertEquals(204, client.login(email, PASSWORD).statusCode());
+            String account = API + "/accounts/" + JSON.readTree(client.get(API + "/accounts").body()).get(0).path("id").asText();
+            var listing = JSON.readTree(client.get(account + "/futures").body()).path("chain").get(0);
+            String ticket = JSON.writeValueAsString(Map.of("requestId", UUID.randomUUID(), "contractId", listing.path("id").asText(),
+                "specVersion", listing.path("specVersion").asInt(), "side", "SELL", "lots", 1));
+            assertEquals(403, client.write("POST", account + "/futures/orders", ticket, "application/json", false).statusCode());
+            assertEquals(409, client.write("POST", account + "/options/orders", ticket, "application/json", true).statusCode());
+            var result = client.write("POST", account + "/futures/orders", ticket, "application/json", true);
+            assertEquals(200, result.statusCode(), result.body());
+            assertEquals("FILLED", JSON.readTree(result.body()).path("status").asText());
+            assertEquals(409, client.write("POST", account + "/options/orders", ticket, "application/json", true).statusCode());
+            assertEquals(404, client.write("DELETE", account + "/options/orders/" + JSON.readTree(result.body()).path("id").asText(), "", null, true).statusCode());
+            String other = email();
+            var intruder = new Browser(app);
+            assertEquals(201, intruder.register(other).statusCode());
+            assertEquals(204, intruder.login(other, PASSWORD).statusCode());
+            assertEquals(404, intruder.get(account + "/futures").statusCode());
+            assertEquals("FILL", JSON.readTree(client.get(account + "/futures").body()).path("journal").get(0).path("kind").asText());
+            assertEquals(0, JSON.readTree(client.get(account + "/options").body()).path("positions").size());
+        }
+    }
+
+    private static void grantDerivativeAccess() {
+        owner.execute("GRANT EXECUTE ON FUNCTION lock_tape_trading_account(uuid, uuid) TO tape_runtime");
+        new ResourceDatabasePopulator(new FileSystemResource("docs/options-runtime-grants.sql")).execute(owner.getDataSource());
     }
 
     @Test

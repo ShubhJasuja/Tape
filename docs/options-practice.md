@@ -4,7 +4,7 @@ The authenticated Options practice workspace has its own virtual cash, orders, p
 
 ## Run locally
 
-Use the `accounts,accounts-local` profiles and a local PostgreSQL 17 instance. Apply Flyway through V8 using the migration identity, then apply `options-runtime-grants.sql` as the schema owner after the existing accounts and synthetic trading grants. Set `TAPE_PRACTICE_OPTIONS_ENABLED=true` on the loopback server. The feature defaults to off. `TAPE_PRACTICE_OPTIONS_FEE_PAISE` defaults to 200 (₹2) and allows 1–10,000 paise. The configured fee is captured when an order is accepted. The demo account must have trading enabled. The options feature flag is separate from the equity trading feature flag.
+Use the `accounts,accounts-local` profiles and a local PostgreSQL 17 instance. Apply Flyway through V9 using the migration identity, then apply `options-runtime-grants.sql` as the schema owner after the existing accounts and synthetic trading grants. Set `TAPE_PRACTICE_OPTIONS_ENABLED=true` on the loopback server. The feature defaults to off. `TAPE_PRACTICE_OPTIONS_FEE_PAISE` defaults to 200 (₹2) and allows 1–10,000 paise. The configured fee is captured when an order is accepted. The demo account must have trading enabled. The options feature flag is separate from the equity trading feature flag. When futures are enabled, both derivatives desks share the same virtual derivatives wallet and show product-specific positions and realized P&L.
 
 Start Java with `-Duser.timezone=UTC` before `-jar` on Windows. Some PostgreSQL images reject the `Asia/Calcutta` alias that the PostgreSQL JDBC driver can send for the Windows timezone. The UI still displays contract times in India Standard Time.
 

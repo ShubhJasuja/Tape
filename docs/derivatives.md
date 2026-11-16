@@ -32,4 +32,4 @@ On Linux use `./mvnw`. The flag enables PostgreSQL 17 Testcontainers, including 
 
 ## Stage 2H practice execution
 
-The isolated [options practice workspace](options-practice.md) adds authenticated execution for deterministic cash-settled fixtures. An external price source still requires authorization for virtual execution. Implement and verify futures daily marks, physical delivery, holiday calendars and broader risk rules before expanding supported contracts.
+The [options practice workspace](options-practice.md) adds authenticated execution for deterministic cash-settled option fixtures. The [futures practice workspace](futures-practice.md) adds a persisted schedule for daily variation and cash settlement. An external price source still requires authorization for virtual execution. Physical delivery requires its own inventory, funding and settlement policy.

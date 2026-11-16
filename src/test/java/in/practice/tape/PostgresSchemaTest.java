@@ -34,6 +34,7 @@ class PostgresSchemaTest {
     private static UUID existingAccount;
     private static UUID existingOrder;
     private static UUID existingWatchlist;
+    private static UUID existingOption;
 
     @BeforeAll
     static void initializeEmptyDatabase() {
@@ -52,6 +53,15 @@ class PostgresSchemaTest {
         existingWatchlist = UUID.randomUUID();
         pg.update("INSERT INTO watchlists (id,user_id,name) VALUES (?,?,'Default')", existingWatchlist, existingOwner);
         pg.update("INSERT INTO watchlist_items (watchlist_id,instrument_id) VALUES (?,?)", existingWatchlist, EXISTING_INSTRUMENT);
+        Flyway.configure().dataSource(pg.getDataSource()).locations("classpath:db/migration/postgresql").target("8").load().migrate();
+        existingOption = UUID.randomUUID();
+        pg.update("INSERT INTO derivative_books(account_id,cash_paise,reserved_paise) VALUES (?,1000,0)", existingAccount);
+        pg.update("""
+            INSERT INTO practice_option_orders(id,account_id,request_id,contract_id,spec_version,side,lots,limit_paise,
+                fee_paise,reservation_paise,status,created_at,updated_at)
+            SELECT ?,?,?,id,1,'BUY',1,100,200,0,'OPEN',now(),now() FROM derivative_contracts
+            WHERE source='TAPE_OPTIONS_PRACTICE_V1' ORDER BY id LIMIT 1
+            """, existingOption, existingAccount, UUID.randomUUID());
         try (var application = startApplication()) {
             assertIsolatedDataSources(application);
         }
@@ -68,7 +78,7 @@ class PostgresSchemaTest {
         var owner = user();
         try (var application = startApplication()) {
             assertIsolatedDataSources(application);
-            assertEquals(List.of("1", "2", "3", "4", "5", "6", "7", "8"), pg.queryForList(
+            assertEquals(List.of("1", "2", "3", "4", "5", "6", "7", "8", "9"), pg.queryForList(
                 "SELECT version FROM flyway_schema_history WHERE success ORDER BY installed_rank", String.class));
             assertEquals(1L, count("SELECT count(*) FROM users WHERE id = ?", owner));
             assertEquals("NSE:RELIANCE", pg.queryForObject("SELECT requested_symbol FROM orders WHERE id=? AND instrument_id=?",
@@ -77,6 +87,10 @@ class PostgresSchemaTest {
                 existingWatchlist, EXISTING_INSTRUMENT));
             assertEquals(4L, count("SELECT quantity FROM positions WHERE account_id=? AND instrument_id=?",
                 existingAccount, EXISTING_INSTRUMENT));
+            assertEquals(1L, count("SELECT count(*) FROM practice_derivative_orders WHERE id=? AND account_id=? AND status='OPEN' AND NOT reduce_only",
+                existingOption, existingAccount));
+            assertTrue(count("SELECT count(*) FROM practice_future_sessions WHERE contract_id IS NOT NULL") > 0);
+            assertThrows(org.springframework.dao.DataAccessException.class, () -> pg.update("UPDATE practice_future_sessions SET mark_at=mark_at"));
         }
     }
 
