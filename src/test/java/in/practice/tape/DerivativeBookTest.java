@@ -232,6 +232,23 @@ class DerivativeBookTest {
     }
 
     @Test
+    void pausedPracticeOrdersCanBeReadRetriedCancelledAndSettled() {
+        var session = practice();
+        var call = listed(session, Kind.CALL);
+        var ticket = new PracticeOptions.Ticket(UUID.randomUUID(), call.id(), call.specVersion(), PracticeOptions.Side.BUY, 1, null);
+        var fill = session.options.submit(session.owner, session.account, ticket);
+        var pending = session.place(call, PracticeOptions.Side.SELL, 1, 20_000L);
+        var paused = new PracticeOptions(db, tx, bookClock(), true, 200, false);
+        assertEquals(fill, paused.submit(session.owner, session.account, ticket));
+        code("OPTIONS_DISABLED", () -> paused.submit(session.owner, session.account,
+            new PracticeOptions.Ticket(UUID.randomUUID(), call.id(), call.specVersion(), PracticeOptions.Side.BUY, 1, null)));
+        assertEquals("CANCELLED", paused.cancel(session.owner, session.account, pending.id()).status());
+        now = call.expiry();
+        paused.settle(new PracticeOptions.Work(session.owner, session.account, call.id()));
+        assertEquals(1, paused.view(session.owner, session.account, 0).settlements().size());
+    }
+
+    @Test
     void practiceCallsAndPutsSupportBothDirectionsWithPremiumFeesAndPartialCloses() {
         var session = practice();
         var call = listed(session, Kind.CALL);

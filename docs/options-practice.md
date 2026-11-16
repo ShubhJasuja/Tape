@@ -8,7 +8,7 @@ Use the `accounts,accounts-local` profiles and a local PostgreSQL 17 instance. A
 
 Start Java with `-Duser.timezone=UTC` before `-jar` on Windows. Some PostgreSQL images reject the `Asia/Calcutta` alias that the PostgreSQL JDBC driver can send for the Windows timezone. The UI still displays contract times in India Standard Time.
 
-V8 adds the practice order table and its indexes, links fills to their account, contract and specification, and adds a fee column with a zero default to the existing immutable journal. V8 adds a finite practice chain using a dedicated source namespace. Later specifications and fixture expiries can be appended through migrations. Existing migrations remain intact. To roll back application code, first disable new option submissions and settle or cancel outstanding work while V8-capable code is available. Keep the migrated tables and journal. Coordinate schema changes with the owner and retain a verified backup.
+V8 adds the practice order table and its indexes, links fills to their account, contract and specification, and adds a fee column with a zero default to the existing immutable journal. V8 adds a finite practice chain using a dedicated source namespace. Later specifications and fixture expiries can be appended through migrations. Existing migrations remain intact. To pause new orders and matching, set `TAPE_PRACTICE_OPTIONS_SUBMISSIONS=false` while keeping `TAPE_PRACTICE_OPTIONS_ENABLED=true`. Reads, retries, cancellation and expiry keep running. Drain orders and positions before disabling the feature or rolling back application code. Keep the migrated tables and journal. Coordinate schema changes with the owner and retain a verified backup.
 
 ## Execution and accounting
 

@@ -61,19 +61,26 @@ final class PracticeOptions {
     private final TransactionTemplate savepoint;
     private final Clock clock;
     private final boolean enabled;
+    private final boolean submissions;
     private final long fee;
 
     @Autowired
     PracticeOptions(JdbcTemplate db, TransactionTemplate tx, @Value("${tape.practice-options.enabled:false}") boolean enabled,
-                    @Value("${tape.practice-options.fee-paise:200}") long fee) {
-        this(db, tx, Clock.systemUTC(), enabled, fee);
+                    @Value("${tape.practice-options.fee-paise:200}") long fee,
+                    @Value("${tape.practice-options.submissions:true}") boolean submissions) {
+        this(db, tx, Clock.systemUTC(), enabled, fee, submissions);
     }
 
     PracticeOptions(JdbcTemplate db, TransactionTemplate tx, Clock clock, boolean enabled, long fee) {
+        this(db, tx, clock, enabled, fee, true);
+    }
+
+    PracticeOptions(JdbcTemplate db, TransactionTemplate tx, Clock clock, boolean enabled, long fee, boolean submissions) {
         if (fee <= 0 || fee > 10_000) throw new IllegalArgumentException("Practice option fee must be 1–10000 paise");
         this.db = db;
         this.clock = clock;
         this.enabled = enabled;
+        this.submissions = submissions;
         this.fee = fee;
         savepoint = new TransactionTemplate(tx.getTransactionManager());
         savepoint.setPropagationBehavior(TransactionDefinition.PROPAGATION_NESTED);
@@ -84,7 +91,7 @@ final class PracticeOptions {
     View view(UUID owner, UUID account, int offset) {
         if (offset < 0 || offset > 1_000_000) throw reject("INVALID_REQUEST");
         return book.locked(owner, account, account, () -> {
-            permit(account);
+            if (!enabled) throw reject("OPTIONS_DISABLED");
             Instant at = now();
             var chain = db.query("""
                 SELECT c.*,s.* FROM derivative_contracts c
@@ -134,7 +141,7 @@ final class PracticeOptions {
         if (ticket == null || ticket.requestId() == null || ticket.contractId() == null || ticket.specVersion() == null ||
             ticket.side() == null || ticket.lots() == null || ticket.lots() < 1 || ticket.lots() > 100_000) throw reject("INVALID_REQUEST");
         return book.locked(owner, account, ticket.requestId(), () -> {
-            permit(account);
+            if (!enabled) throw reject("OPTIONS_DISABLED");
             var prior = find(account, "o.request_id", ticket.requestId());
             if (prior != null) {
                 if (!prior.contractId().equals(ticket.contractId()) || prior.specVersion() != ticket.specVersion() ||
@@ -142,17 +149,19 @@ final class PracticeOptions {
                     !java.util.Objects.equals(prior.limitPaise(), ticket.limitPaise())) throw reject("REQUEST_CONFLICT");
                 return prior;
             }
+            if (!submissions || !tradingEnabled(account)) throw reject("OPTIONS_DISABLED");
             Instant at = now();
             Contract contract = contracts.contract(ticket.contractId());
             Spec effective = contracts.effective(contract.id(), at);
             if (!at.isBefore(contract.expiry())) throw reject("CONTRACT_NOT_ACTIVE");
-            if (!eligible(contract, effective)) throw reject("UNSUPPORTED_CONTRACT");
+            if (!PracticeOptionPrices.supports(contract) || effective == null) throw reject("UNSUPPORTED_CONTRACT");
             if (Boolean.TRUE.equals(db.queryForObject("""
                 SELECT EXISTS(SELECT 1 FROM practice_option_orders WHERE account_id=? AND contract_id=? AND status='OPEN')
                 """, Boolean.class, account, contract.id()))) throw reject("OPEN_ORDER_EXISTS");
             var position = book.position(account, contract.id());
             Spec spec = position.lots() == 0 ? effective : contracts.version(contract.id(), position.version());
-            if (spec.version() != ticket.specVersion() || !eligible(contract, spec)) throw reject("SPEC_CHANGED");
+            if (spec.version() != ticket.specVersion()) throw reject("SPEC_CHANGED");
+            if (!eligible(contract, spec)) throw reject("UNSUPPORTED_CONTRACT");
             long delta = ticket.side() == Side.BUY ? ticket.lots() : -ticket.lots();
             long net = position.lots() + delta;
             long opened = ticket.lots() - (Long.signum(position.lots()) == -Long.signum(delta) ? min(abs(position.lots()), abs(delta)) : 0);
@@ -172,7 +181,8 @@ final class PracticeOptions {
                 if (reserve != 0) book.reserve(owner, account, UUID.randomUUID(), reserve);
             }
             UUID id = UUID.randomUUID();
-            if (fillNow) book.fill(owner, account, id, contract.id(), multiplyExact(delta, spec.lotSize()), mark, fee);
+            if (fillNow && book.fill(owner, account, id, contract.id(), multiplyExact(delta, spec.lotSize()), mark, fee).version()
+                != spec.version()) throw reject("SPEC_CHANGED");
             db.update("""
                 INSERT INTO practice_option_orders(id,account_id,request_id,contract_id,spec_version,side,lots,limit_paise,
                     fee_paise,reservation_paise,status,fill_request_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
@@ -218,7 +228,7 @@ final class PracticeOptions {
                 finish(work.owner(), work.account(), order, "EXPIRED", null);
                 return null;
             }
-            if (!tradingEnabled(work.account())) return null;
+            if (!submissions || !tradingEnabled(work.account())) return null;
             var contract = contracts.contract(order.contractId());
             var spec = contracts.version(contract.id(), order.specVersion());
             if (!eligible(contract, spec)) {
@@ -270,10 +280,6 @@ final class PracticeOptions {
             if (reserved != state.wallet().reserved() || mismatchedFill) throw reject("JOURNAL_MISMATCH");
             return state;
         });
-    }
-
-    private void permit(UUID account) {
-        if (!tradingEnabled(account)) throw reject("OPTIONS_DISABLED");
     }
 
     private boolean tradingEnabled(UUID account) {
