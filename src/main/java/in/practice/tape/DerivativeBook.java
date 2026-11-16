@@ -103,6 +103,10 @@ final class DerivativeBook {
     }
 
     Event fill(UUID owner, UUID account, UUID request, UUID contractId, long signedQuantity, long price, long fee) {
+        return fill(owner, account, request, contractId, signedQuantity, price, fee, null);
+    }
+
+    Event fill(UUID owner, UUID account, UUID request, UUID contractId, long signedQuantity, long price, long fee, Instant sampledAt) {
         return locked(owner, account, request, () -> {
             if (fee < 0) throw reject("INVALID_FEE");
             bounded(fee);
@@ -114,7 +118,8 @@ final class DerivativeBook {
                 }
                 return prior;
             }
-            Instant at = now();
+            Instant at = sampledAt == null ? now() : sampledAt;
+            validateTime(at);
             Contract contract = contracts.contract(contractId);
             Spec effective = contracts.effective(contractId, at);
             if (contract.status(at, effective) != Status.ACTIVE) throw reject("CONTRACT_NOT_ACTIVE");

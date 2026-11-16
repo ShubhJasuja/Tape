@@ -30,6 +30,8 @@ Stage 2G adds a separate PostgreSQL derivatives book with versioned contracts, p
 
 Stage 2H adds an opt-in options workspace with virtual market and limit orders on the synthetic Practice Index. See the [options setup, accounting rules and API](docs/options-practice.md).
 
+Stage 2I adds opt-in cash-settled Practice Index futures. See the [futures setup, daily marking and margin policy](docs/futures-practice.md).
+
 ## Research and local AI
 
 **Analyze a stock** computes 20-session return, daily realized volatility, and maximum drawdown from daily synthetic closes. **Analyze portfolio** reports position and sector concentration, cash allocation, and return since inception in the legacy Demo terminal.
