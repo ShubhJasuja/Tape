@@ -7,6 +7,7 @@
       {"segment":"NSE_FO","exchange":"NSE","instrument_key":"NSE_FO|903","trading_symbol":"[redacted] 100 PE","expiry":"2025-01-01","instrument_type":"PE","underlying_key":"NSE_EQ|ZZ0000000002","strike_price":100,"lot_size":25},
       {"segment":"NSE_FO","exchange":"BSE","instrument_key":"NSE_FO|904","trading_symbol":"[redacted] FUT","expiry":"2026-12-01","instrument_type":"FUT","lot_size":25},
       {"segment":"NSE_FO","exchange":"NSE","instrument_key":"NSE_FO|905","trading_symbol":"[redacted] FUT","expiry":"2026-12-01","instrument_type":"FUT","underlying_type":"INDEX","underlying_key":"NSE_INDEX|Redacted Index","lot_size":25,"qty_multiplier":1,"minimum_lot":25,"freeze_quantity":225,"weekly":false},
+      {"segment":"NSE_FO","exchange":"NSE","instrument_key":"NSE_FO|906","trading_symbol":"[redacted] FUT","expiry":"2026-12-02","instrument_type":"FUT","underlying_type":"INDEX","underlying_key":"NSE_INDEX|Redacted Index","lot_size":50,"qty_multiplier":1,"minimum_lot":50},
       {"segment":"BSE_INDEX","exchange":"BSE","instrument_key":"BSE_INDEX|Fixture Index","trading_symbol":"FIXTURE","instrument_type":"INDEX"}
     ],
     "meta_data":{"page":{"page_number":1,"total_pages":2}}

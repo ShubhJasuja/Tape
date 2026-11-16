@@ -157,7 +157,12 @@ class MarketDataProviderTest {
             assertEquals(225, future.freezeQuantity());
             assertEquals(1, future.quantityMultiplier().intValueExact());
             assertEquals(false, future.weekly());
-            assertTrue(proxy.search("Redacted", "NSE", Segment.FUTURES, EXPIRY.plusDays(1), 1).instruments().isEmpty());
+            var replacement = proxy.search("Redacted", "NSE", Segment.FUTURES, EXPIRY.plusDays(1), 1).instruments().getFirst();
+            assertEquals(future.underlyingKey(), replacement.underlyingKey());
+            assertNotEquals(future.key(), replacement.key());
+            assertEquals(25, future.lotSize());
+            assertEquals(50, replacement.lotSize());
+            assertTrue(proxy.search("Redacted", "NSE", Segment.FUTURES, EXPIRY.plusDays(2), 1).instruments().isEmpty());
         }
     }
 
