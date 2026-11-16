@@ -10,8 +10,10 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.*;
 
+import java.time.Instant;
 import java.time.LocalDate;
 import java.util.Arrays;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
 
@@ -27,8 +29,11 @@ final class MarketDataApi {
     private final JdbcTemplate db;
     private final ProviderCatalog catalog;
 
-    record Status(String source, String status, Set<Capability> capabilities, List<Interval> intervals) {}
+    static final int STREAM_LIMIT = 16;
+    private static final String DEFAULT_LIST = "Default";
+    record Status(String source, String status, Set<Capability> capabilities, List<Interval> intervals, String displayDelay) {}
     record Watch(String instrumentKey) {}
+    record Watchlist(String name) {}
 
     MarketDataApi(MarketDataProvider provider, MarketDataAccess access, JdbcTemplate db, ProviderCatalog catalog) {
         this.provider = provider;
@@ -41,7 +46,7 @@ final class MarketDataApi {
     ResponseEntity<Status> status(@AuthenticationPrincipal AccountDirectory.Principal user) {
         Set<Capability> capabilities = access.capabilities(user.userId());
         return response(new Status(provider.source(), access.status(user.userId()), capabilities,
-            capabilities.contains(Capability.HISTORY) ? Arrays.asList(Interval.values()) : List.of()));
+            capabilities.contains(Capability.HISTORY) ? Arrays.asList(Interval.values()) : List.of(), access.displayDelay(user.userId())));
     }
 
     @GetMapping("/instruments")
@@ -51,7 +56,7 @@ final class MarketDataApi {
         access.require(user.userId(), Capability.CATALOG);
         if (segment == Segment.OPTIONS || segment == Segment.FUTURES) access.requirePermission(user.userId(), Capability.DERIVATIVES);
         if (page < 1 || page > 50 || query(q).isEmpty()) throw invalid();
-        if ((segment != Segment.EQUITY && "BSE".equals(exchange)) ||
+        if (((segment == Segment.FUTURES || segment == Segment.OPTIONS) && "BSE".equals(exchange)) ||
             (expiry != null && segment != Segment.OPTIONS && segment != Segment.FUTURES)) throw invalid();
         if (expiry != null) activeExpiry(expiry, today());
         return response(provider.search(query(q), exchangeFilter(exchange), segment, expiry, page));
@@ -67,8 +72,9 @@ final class MarketDataApi {
 
     @GetMapping("/indices")
     ResponseEntity<Page> indices(@AuthenticationPrincipal AccountDirectory.Principal user,
-                                 @RequestParam(defaultValue = "Nifty") String q, @RequestParam(defaultValue = "1") int page) {
-        return search(user, q, "NSE", Segment.INDEX, null, page);
+                                 @RequestParam(defaultValue = "Nifty") String q, @RequestParam(defaultValue = "NSE") String exchange,
+                                 @RequestParam(defaultValue = "1") int page) {
+        return search(user, q, exchange, Segment.INDEX, null, page);
     }
 
     @GetMapping("/futures")
@@ -115,12 +121,29 @@ final class MarketDataApi {
                                     @RequestParam(required = false) LocalDate from, @RequestParam(required = false) LocalDate to) {
         access.require(user.userId(), Capability.HISTORY);
         checkDerivative(user, key);
-        LocalDate last = to == null ? today().minusDays(1) : to;
+        LocalDate latest = access.historyThrough(Instant.now());
+        LocalDate last = to == null ? latest : to;
         LocalDate first = from == null ? last.minusDays(interval.days - 1L) : from;
         LocalDate earliest = interval == Interval.DAILY ? LocalDate.of(2000, 1, 1) : LocalDate.of(2022, 1, 1);
-        if (first.isBefore(earliest) || first.isAfter(last) || !last.isBefore(today()) ||
+        if (first.isBefore(earliest) || first.isAfter(last) || last.isAfter(latest) ||
             java.time.temporal.ChronoUnit.DAYS.between(first, last) >= interval.days) throw invalid();
         return response(provider.candles(key(key), interval, first, last));
+    }
+
+    @GetMapping("/intraday")
+    ResponseEntity<History> intraday(@AuthenticationPrincipal AccountDirectory.Principal user, @RequestParam String key,
+                                    @RequestParam(defaultValue = "FIVE_MINUTES") Interval interval) {
+        access.require(user.userId(), Capability.INTRADAY);
+        checkDerivative(user, key);
+        return response(provider.intraday(key(key), interval));
+    }
+
+    @GetMapping("/market-session")
+    ResponseEntity<Session> session(@AuthenticationPrincipal AccountDirectory.Principal user, @RequestParam String exchange) {
+        access.require(user.userId(), Capability.CALENDAR);
+        if (!Set.of("NSE", "BSE", "NFO").contains(exchange)) throw invalid();
+        if ("NFO".equals(exchange)) access.requirePermission(user.userId(), Capability.DERIVATIVES);
+        return response(provider.session(exchange, today()));
     }
 
     @GetMapping("/stream")
@@ -130,29 +153,87 @@ final class MarketDataApi {
         return response(provider.stream(key(key)));
     }
 
-    @GetMapping("/watchlist")
-    ResponseEntity<List<Watch>> watchlist(@AuthenticationPrincipal AccountDirectory.Principal user) {
+    @GetMapping("/streams")
+    ResponseEntity<Streams> streams(@AuthenticationPrincipal AccountDirectory.Principal user, @RequestParam List<String> keys) {
+        access.require(user.userId(), Capability.STREAM);
+        if (keys.isEmpty() || keys.size() > STREAM_LIMIT) throw invalid();
+        var unique = new LinkedHashSet<String>();
+        for (var key : keys) {
+            checkDerivative(user, key);
+            unique.add(key(key));
+        }
+        return response(provider.streams(unique));
+    }
+
+    @GetMapping("/watchlists")
+    ResponseEntity<List<Watchlist>> watchlists(@AuthenticationPrincipal AccountDirectory.Principal user) {
         access.requirePermission(user.userId(), Capability.WATCHLIST);
-        return response(db.query("SELECT instrument_key FROM market_watchlist WHERE user_id=? AND source=? ORDER BY instrument_key",
-            (rs, n) -> new Watch(rs.getString(1)), user.userId(), provider.source()));
+        var lists = db.query("SELECT name FROM market_watchlists WHERE user_id=? AND source=? AND name<>? ORDER BY name",
+            (rs, n) -> new Watchlist(rs.getString(1)), user.userId(), provider.source(), DEFAULT_LIST);
+        var result = new java.util.ArrayList<Watchlist>();
+        result.add(new Watchlist(DEFAULT_LIST));
+        result.addAll(lists);
+        return response(result);
+    }
+
+    @PostMapping("/watchlists")
+    ResponseEntity<Void> createWatchlist(@AuthenticationPrincipal AccountDirectory.Principal user, @RequestBody Watchlist list) {
+        access.requirePermission(user.userId(), Capability.WATCHLIST);
+        String name = listName(list.name());
+        if (DEFAULT_LIST.equals(name)) throw invalid();
+        createList(user, name);
+        return noContent();
+    }
+
+    @DeleteMapping("/watchlists")
+    ResponseEntity<Void> deleteWatchlist(@AuthenticationPrincipal AccountDirectory.Principal user, @RequestParam String name) {
+        access.requirePermission(user.userId(), Capability.WATCHLIST);
+        if (DEFAULT_LIST.equals(listName(name))) throw invalid();
+        db.update("DELETE FROM market_watchlists WHERE user_id=? AND source=? AND name=?", user.userId(), provider.source(), name);
+        return noContent();
+    }
+
+    @GetMapping("/watchlist")
+    ResponseEntity<List<Watch>> watchlist(@AuthenticationPrincipal AccountDirectory.Principal user,
+                                         @RequestParam(defaultValue = DEFAULT_LIST) String name) {
+        access.requirePermission(user.userId(), Capability.WATCHLIST);
+        return response(db.query("""
+            SELECT instrument_key FROM market_watchlist WHERE user_id=? AND source=? AND watchlist_name=? ORDER BY instrument_key
+            """, (rs, n) -> new Watch(rs.getString(1)), user.userId(), provider.source(), listName(name)));
     }
 
     @PutMapping("/watchlist")
-    ResponseEntity<Void> pin(@AuthenticationPrincipal AccountDirectory.Principal user, @RequestBody Watch watch) {
+    ResponseEntity<Void> pin(@AuthenticationPrincipal AccountDirectory.Principal user, @RequestBody Watch watch,
+                             @RequestParam(defaultValue = DEFAULT_LIST) String name) {
         access.requirePermission(user.userId(), Capability.WATCHLIST);
         checkDerivative(user, watch.instrumentKey());
+        listName(name);
+        if (DEFAULT_LIST.equals(name)) createList(user, name);
+        if (!Boolean.TRUE.equals(db.queryForObject("SELECT EXISTS (SELECT 1 FROM market_watchlists WHERE user_id=? AND source=? AND name=?)",
+            Boolean.class, user.userId(), provider.source(), name))) throw failure(HttpStatus.NOT_FOUND, "MARKET_WATCHLIST_UNAVAILABLE");
         db.update("""
-            INSERT INTO market_watchlist(user_id, source, instrument_key) VALUES (?, ?, ?) ON CONFLICT DO NOTHING
-            """, user.userId(), provider.source(), key(watch.instrumentKey()));
-        return ResponseEntity.noContent().cacheControl(CacheControl.noStore()).build();
+            INSERT INTO market_watchlist(user_id, source, watchlist_name, instrument_key) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING
+            """, user.userId(), provider.source(), name, key(watch.instrumentKey()));
+        return noContent();
     }
 
     @DeleteMapping("/watchlist")
-    ResponseEntity<Void> unpin(@AuthenticationPrincipal AccountDirectory.Principal user, @RequestParam String key) {
+    ResponseEntity<Void> unpin(@AuthenticationPrincipal AccountDirectory.Principal user, @RequestParam String key,
+                               @RequestParam(defaultValue = DEFAULT_LIST) String name) {
         access.requirePermission(user.userId(), Capability.WATCHLIST);
-        db.update("DELETE FROM market_watchlist WHERE user_id=? AND source=? AND instrument_key=?",
-            user.userId(), provider.source(), key(key));
-        return ResponseEntity.noContent().cacheControl(CacheControl.noStore()).build();
+        db.update("DELETE FROM market_watchlist WHERE user_id=? AND source=? AND watchlist_name=? AND instrument_key=?",
+            user.userId(), provider.source(), listName(name), key(key));
+        return noContent();
+    }
+
+    private void createList(AccountDirectory.Principal user, String name) {
+        db.update("INSERT INTO market_watchlists (user_id, source, name) VALUES (?, ?, ?) ON CONFLICT DO NOTHING",
+            user.userId(), provider.source(), name);
+    }
+
+    private static String listName(String name) {
+        if (name == null || !name.matches("[A-Za-z0-9][A-Za-z0-9 _-]{0,39}") || !name.equals(name.strip())) throw invalid();
+        return name;
     }
 
     private void checkDerivative(AccountDirectory.Principal user, String key) {
@@ -173,6 +254,7 @@ final class MarketDataApi {
     ResponseEntity<ProblemDetail> unavailable() { return problem(HttpStatus.SERVICE_UNAVAILABLE, "MARKET_STORAGE_UNAVAILABLE"); }
 
     private static LocalDate today() { return LocalDate.now(UpstoxMarketData.IST); }
+    private static ResponseEntity<Void> noContent() { return ResponseEntity.noContent().cacheControl(CacheControl.noStore()).build(); }
     private static <T> ResponseEntity<T> response(T payload) { return ResponseEntity.ok().cacheControl(CacheControl.noStore()).body(payload); }
     private static ResponseEntity<ProblemDetail> problem(HttpStatus status, String code) {
         var problem = ProblemDetail.forStatus(status);

@@ -19,6 +19,7 @@ const ist = new Intl.DateTimeFormat('en-IN', { timeZone: 'Asia/Kolkata', hour: '
 const dates = new Intl.DateTimeFormat('en-IN', { day: 'numeric', month: 'short', timeZone: 'UTC' });
 const day = s => dates.format(new Date(s + 'T00:00:00Z'));
 const exchangeDay = new Intl.DateTimeFormat('en-IN', { day: 'numeric', month: 'short', timeZone: 'Asia/Kolkata' });
+const volumeFormat = new Intl.NumberFormat('en-IN');
 const query = params => new URLSearchParams(params);
 const tone = n => n > 0 ? 'up' : n < 0 ? 'down' : '';
 async function api(path, options) {
@@ -56,7 +57,7 @@ function Chart({ candles, symbol, interval = 'DAILY' }) {
       const max = Math.max(...candles.map(c => c.high));
       const pad = Math.max((max - min) * .12, 1);
       const y = value => top + (max + pad - value) / (max - min + 2 * pad) * (bottom - top - 49);
-      const maxVolume = Math.max(1, ...candles.map(c => c.volume));
+      const maxVolume = Math.max(1, ...candles.map(c => c.volume ?? 0));
       ctx.font = '11px "IBM Plex Mono", monospace';
       ctx.textBaseline = 'middle';
       for (let n = 0; n < 5; n++) {
@@ -81,11 +82,11 @@ function Chart({ candles, symbol, interval = 'DAILY' }) {
         }
         ctx.globalAlpha = 1;
       });
-      const ticks = w < 420 ? 3 : 5;
+      const ticks = Math.min(candles.length, w < 420 ? 3 : 5);
       ctx.fillStyle = '#a5afbe';
       ctx.textAlign = 'center';
       for (let n = 0; n < ticks; n++) {
-        const index = Math.round((candles.length - 1) * n / (ticks - 1));
+        const index = Math.round((candles.length - 1) * n / Math.max(1, ticks - 1));
         const x = Math.max(23, Math.min(right - 12, left + step * (index + .5)));
         ctx.fillText(barTime(candles[index]), x, h - 12);
       }
@@ -102,8 +103,16 @@ function Chart({ candles, symbol, interval = 'DAILY' }) {
   }, [candles, hover, interval]);
   return <>
     <div className="ohlc mono">{hovered ? <><span>{barTime(hovered)}</span>{[['O', 'open'], ['H', 'high'], ['L', 'low'], ['C', 'close']].map(([label, key]) =>
-      <span key={key}>{label} <b>{price(hovered[key])}</b></span>)}</> : 'Daily OHLC'}</div>
-    {candles.length ? <canvas ref={canvas} role="img" aria-label={ticker(symbol) + ' candlestick and volume chart'}
+      <span key={key}>{label} <b>{price(hovered[key])}</b></span>)}
+      <span>Volume <b>{hovered.volume == null ? '—' : volumeFormat.format(hovered.volume)}</b></span></> : 'Daily OHLC'}</div>
+    {candles.length ? <canvas ref={canvas} role="img" tabIndex={0} aria-label={ticker(symbol) + ' candlestick and volume chart'}
+      onKeyDown={e => {
+        if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+        e.preventDefault();
+        const direction = e.key === 'ArrowLeft' ? -1 : 1;
+        setHover(index => Math.max(0, Math.min(candles.length - 1, (index ?? candles.length - 1) + direction)));
+      }}
+      onBlur={() => setHover(null)}
       onPointerMove={e => {
         const rect = e.currentTarget.getBoundingClientRect();
         const index = Math.floor((e.clientX - rect.left - 9) / (rect.width - 87) * candles.length);

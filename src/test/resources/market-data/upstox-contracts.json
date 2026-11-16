@@ -6,7 +6,8 @@
       {"segment":"NSE_FO","exchange":"NSE","instrument_key":"NSE_FO|901","trading_symbol":"[redacted] 100 CE","name":"[redacted]","expiry":"2026-12-01","instrument_type":"CE","underlying_key":"NSE_EQ|ZZ0000000002","underlying_type":"EQUITY","strike_price":100,"lot_size":25,"tick_size":5},
       {"segment":"NSE_FO","exchange":"NSE","instrument_key":"NSE_FO|903","trading_symbol":"[redacted] 100 PE","expiry":"2025-01-01","instrument_type":"PE","underlying_key":"NSE_EQ|ZZ0000000002","strike_price":100,"lot_size":25},
       {"segment":"NSE_FO","exchange":"BSE","instrument_key":"NSE_FO|904","trading_symbol":"[redacted] FUT","expiry":"2026-12-01","instrument_type":"FUT","lot_size":25},
-      {"segment":"NSE_FO","exchange":"NSE","instrument_key":"NSE_FO|905","trading_symbol":"[redacted] FUT","expiry":"2026-12-01","instrument_type":"FUT","underlying_type":"INDEX","underlying_key":"NSE_INDEX|Redacted Index","lot_size":25}
+      {"segment":"NSE_FO","exchange":"NSE","instrument_key":"NSE_FO|905","trading_symbol":"[redacted] FUT","expiry":"2026-12-01","instrument_type":"FUT","underlying_type":"INDEX","underlying_key":"NSE_INDEX|Redacted Index","lot_size":25,"qty_multiplier":1,"minimum_lot":25,"freeze_quantity":225,"weekly":false},
+      {"segment":"BSE_INDEX","exchange":"BSE","instrument_key":"BSE_INDEX|Fixture Index","trading_symbol":"FIXTURE","instrument_type":"INDEX"}
     ],
     "meta_data":{"page":{"page_number":1,"total_pages":2}}
   },
@@ -18,7 +19,22 @@
   },
   "indexQuote": {
     "status":"success", "data":{"NSE_INDEX:Redacted Index":{"last_price":100, "prev_close_price":95,
-      "timestamp":"2026-11-14T15:29:58+05:30"}}
+      "timestamp":"2026-11-14T15:29:58+05:30"},
+      "BSE_INDEX:Fixture Index":{"last_price":101}}
+  },
+  "intraday":{
+    "status":"success","data":{"candles":[
+      ["2026-11-13T15:20:00+05:30",100,101,99,100,100],
+      ["2026-11-14T09:20:00+05:30",100,103,99,101,500],
+      ["2026-11-14T09:15:00+05:30",100,101,99,100,0],
+      ["2026-11-14T09:30:00+05:30",100,102,99,101,null],
+      ["2026-11-14T15:35:00+05:30",100,102,99,101,500]
+    ]}
+  },
+  "holidays":{
+    "status":"success","data":[
+      {"date":"2026-11-14","description":"Fixture holiday","holiday_type":"TRADING_HOLIDAY","closed_exchanges":["NSE"],"open_exchanges":[]}
+    ]
   },
   "history":{
     "status":"success","data":{"candles":[
@@ -33,7 +49,9 @@
   "chain":{
     "status":"success","data":[
       {"expiry":"2026-12-01","strike_price":120,"underlying_key":"NSE_EQ|ZZ0000000002","put_options":{"instrument_key":"NSE_FO|902","market_data":{"ltp":3,"ask_price":4}}},
-      {"expiry":"2026-12-01","strike_price":100,"underlying_key":"NSE_EQ|ZZ0000000002","call_options":{"instrument_key":"NSE_FO|901","market_data":{"ltp":1.6,"oi":900,"volume":0,"bid_price":1.5}}},
+      {"expiry":"2026-12-01","strike_price":100,"underlying_key":"NSE_EQ|ZZ0000000002","underlying_spot_price":102,"pcr":1.2,
+        "call_options":{"instrument_key":"NSE_FO|901","market_data":{"ltp":1.6,"oi":900,"volume":0,"bid_price":1.5,"bid_qty":20,"prev_oi":800,"close_price":1.4},
+          "option_greeks":{"iv":15.5,"delta":0.25,"gamma":0,"theta":-0.45,"vega":0.12,"pop":32}}},
       {"expiry":"2026-12-02","strike_price":140,"underlying_key":"NSE_EQ|ZZ0000000002"}
     ]
   }

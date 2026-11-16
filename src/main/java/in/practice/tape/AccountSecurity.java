@@ -79,9 +79,12 @@ class AccountSecurity {
                 .requestMatchers(HttpMethod.GET, "/api/v1/market-data/status", "/api/v1/market-data/instruments", "/api/v1/market-data/instrument",
                     "/api/v1/market-data/indices", "/api/v1/market-data/futures", "/api/v1/market-data/options",
                     "/api/v1/market-data/option-chain", "/api/v1/market-data/quote", "/api/v1/market-data/exchange-status",
-                    "/api/v1/market-data/candles", "/api/v1/market-data/stream", "/api/v1/market-data/watchlist").authenticated()
+                    "/api/v1/market-data/candles", "/api/v1/market-data/intraday", "/api/v1/market-data/market-session",
+                    "/api/v1/market-data/stream", "/api/v1/market-data/streams", "/api/v1/market-data/watchlist",
+                    "/api/v1/market-data/watchlists").authenticated()
+                .requestMatchers(HttpMethod.POST, "/api/v1/market-data/watchlists").authenticated()
                 .requestMatchers(HttpMethod.PUT, "/api/v1/market-data/watchlist").authenticated()
-                .requestMatchers(HttpMethod.DELETE, "/api/v1/market-data/watchlist").authenticated()
+                .requestMatchers(HttpMethod.DELETE, "/api/v1/market-data/watchlist", "/api/v1/market-data/watchlists").authenticated()
                 .requestMatchers(HttpMethod.DELETE, "/api/v1/accounts/*/orders/*").authenticated()
                 .requestMatchers(HttpMethod.PUT, "/api/v1/accounts/*/watchlist").authenticated()
                 .anyRequest().denyAll())
