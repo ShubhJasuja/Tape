@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { Activity } from 'lucide-react';
 import './accounts.css';
 import MarketData from './marketData.jsx';
+import OptionsWorkspace from './options.jsx';
 
 const api = '/api/v1';
 const amount = new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR' });
@@ -10,13 +11,13 @@ async function request(path, options) {
   return fetch(api + path, { credentials: 'same-origin', cache: 'no-store', ...options });
 }
 
-async function post(path, body, contentType) {
+async function write(path, body, contentType, method = 'POST') {
   const tokenResponse = await request('/auth/csrf');
   if (!tokenResponse.ok) throw new Error('Could not prepare a secure request. Please try again.');
   const { headerName, token } = await tokenResponse.json();
   const headers = { [headerName]: token };
   if (contentType) headers['Content-Type'] = contentType;
-  return request(path, { method: 'POST', headers, body });
+  return request(path, { method, headers, body });
 }
 
 export default function TapeEntry({ Terminal, Chart }) {
@@ -98,8 +99,8 @@ function AccountWorkspace({ user, restore, signOut, Terminal, Chart }) {
     setMessage('');
     try {
       const response = registering
-        ? await post('/auth/register', JSON.stringify({ email, password }), 'application/json')
-        : await post('/auth/login', new URLSearchParams({ email, password }), 'application/x-www-form-urlencoded');
+        ? await write('/auth/register', JSON.stringify({ email, password }), 'application/json')
+        : await write('/auth/login', new URLSearchParams({ email, password }), 'application/x-www-form-urlencoded');
       if (response.status === 429) throw new Error('Too many attempts. Wait a minute and try again.');
       if (registering && response.status === 201) {
         setRegistering(false);
@@ -128,7 +129,7 @@ function AccountWorkspace({ user, restore, signOut, Terminal, Chart }) {
     setError('');
     setMessage('');
     try {
-      const response = await post('/auth/logout');
+      const response = await write('/auth/logout');
       if (response.status !== 204 && response.status !== 401) throw new Error('Sign-out failed. Please try again.');
       signOut();
     } catch (failure) {
@@ -137,19 +138,22 @@ function AccountWorkspace({ user, restore, signOut, Terminal, Chart }) {
   }
 
   const active = accounts?.find(account => account.id === selection);
+  const demo = accounts?.find(account => account.mode === 'DEMO');
   const showMarket = !!user && workspace === 'market';
+  const showOptions = !!user && workspace === 'options';
   return <>
     <header className="top account-top">
       <a className="brand" href="#workspace"><span className="brand-mark"><Activity size={23}/></span> Tape
         <span className="brand-sub">PAPER TRADING</span></a>
       {user && <nav className="tabs" aria-label="Workspace">
-        <button className={!showMarket ? 'selected' : ''} aria-pressed={!showMarket} onClick={() => setWorkspace('paper')}>Paper accounts</button>
+        <button className={!showMarket && !showOptions ? 'selected' : ''} aria-pressed={!showMarket && !showOptions} onClick={() => setWorkspace('paper')}>Paper accounts</button>
         <button className={showMarket ? 'selected' : ''} aria-pressed={showMarket} onClick={() => setWorkspace('market')}>Market data</button>
+        <button className={showOptions ? 'selected' : ''} aria-pressed={showOptions} onClick={() => setWorkspace('options')}>Options practice</button>
       </nav>}
       {user && <div className="account-session"><span>{user.email}</span>
         <button className="quiet" onClick={logout} disabled={busy}>Sign out</button></div>}
     </header>
-    <main id="workspace" className="account-page" hidden={showMarket}>
+    <main id={showOptions ? undefined : 'workspace'} className="account-page" hidden={showMarket || showOptions}>
       <section className="panel account-panel" aria-labelledby="account-title">
         <h1 id="account-title">{user ? 'Your paper accounts' : registering ? 'Create your account' : 'Sign in to Tape'}</h1>
         {error && <p className="notice" role="alert">{error}</p>}
@@ -188,6 +192,9 @@ function AccountWorkspace({ user, restore, signOut, Terminal, Chart }) {
       </section>
     </main>
     {showMarket ? <MarketData signOut={signOut} Chart={Chart} /> :
+      showOptions ? (demo ?
+        <OptionsWorkspace key={demo.id} account={demo.id} read={request} write={write} signOut={signOut} /> :
+        <main id="workspace"><p role={error ? 'alert' : 'status'}>{error || (accounts ? 'No demo account is available.' : 'Loading your demo account…')}</p></main>) :
       active?.tradingEnabled && <Terminal key={active.id} demoAccount={active.id} sessionExpired={signOut} />}
   </>;
 }

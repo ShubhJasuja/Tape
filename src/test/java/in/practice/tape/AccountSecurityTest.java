@@ -181,6 +181,46 @@ class AccountSecurityTest {
     }
 
     @Test
+    void practiceOptionsUseSessionCsrfOwnershipAndLeastPrivilege() throws Exception {
+        new ResourceDatabasePopulator(new FileSystemResource("docs/trading-runtime-grants.sql"),
+            new FileSystemResource("docs/options-runtime-grants.sql")).execute(owner.getDataSource());
+        try (var app = startApplication(true, false, false, Map.of("tape.practice-options.enabled", true))) {
+            var client = new Browser(app);
+            var other = new Browser(app);
+            String email = email();
+            assertEquals(201, client.register(email).statusCode());
+            assertEquals(401, client.get(API + "/accounts/" + UUID.randomUUID() + "/options").statusCode());
+            assertEquals(204, client.login(email, PASSWORD).statusCode());
+            var accounts = JSON.readTree(client.get(API + "/accounts").body());
+            String path = API + "/accounts/" + accounts.get(0).path("id").asText() + "/options";
+            assertEquals(404, client.get(API + "/accounts/" + accounts.get(1).path("id").asText() + "/options").statusCode());
+            var view = JSON.readTree(client.get(path).body());
+            assertEquals("TAPE_OPTIONS_PRACTICE_V1", view.path("source").asText());
+            var listing = view.path("chain").get(0);
+            String ticket = JSON.writeValueAsString(Map.of("requestId", UUID.randomUUID(), "contractId", listing.path("id").asText(),
+                "specVersion", listing.path("specVersion").asInt(), "side", "SELL", "lots", 1, "limitPaise", 25_000));
+            assertEquals(403, client.write("POST", path + "/orders", ticket, "application/json", false).statusCode());
+            var result = client.write("POST", path + "/orders", ticket, "application/json", true);
+            assertEquals(200, result.statusCode(), result.body());
+            String order = path + "/orders/" + JSON.readTree(result.body()).path("id").asText();
+            assertEquals(403, client.write("DELETE", order, "", null, false).statusCode());
+            String otherEmail = email();
+            assertEquals(201, other.register(otherEmail).statusCode());
+            assertEquals(204, other.login(otherEmail, PASSWORD).statusCode());
+            assertEquals(404, other.get(path).statusCode());
+            assertEquals(404, other.write("DELETE", order, "", null, true).statusCode());
+            assertEquals("CANCELLED", JSON.readTree(client.write("DELETE", order, "", null, true).body()).path("status").asText());
+            String market = JSON.writeValueAsString(Map.of("requestId", UUID.randomUUID(), "contractId", listing.path("id").asText(),
+                "specVersion", listing.path("specVersion").asInt(), "side", "BUY", "lots", 1));
+            var filled = client.write("POST", path + "/orders", market, "application/json", true);
+            assertEquals(200, filled.statusCode(), filled.body());
+            assertEquals("FILLED", JSON.readTree(filled.body()).path("status").asText());
+            assertThrows(org.springframework.dao.DataAccessException.class, () -> new JdbcTemplate(runtimeDataSource())
+                .update("UPDATE derivative_events SET cash_delta_paise=0"));
+        }
+    }
+
+    @Test
     void expiredTomcatSessionNoLongerAuthorizesRequests() throws Exception {
         var client = registered(email());
         var server = (TomcatWebServer) ((ServletWebServerApplicationContext) local).getWebServer();
