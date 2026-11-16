@@ -22,10 +22,10 @@ class PaperOrderMatcher extends OperationsWorker {
     private final AtomicBoolean busy = new AtomicBoolean();
     private PaperOrders.Candidate cursor;
 
-    PaperOrderMatcher(PaperOrders orders, SyntheticQuotes quotes, TradingMetrics metrics,
+    PaperOrderMatcher(PaperOrders orders, SyntheticQuotes quotes, TradingMetrics metrics, WorkerCoordinator coordinator,
                       @Value("${tape.synthetic-trading.batch-size:100}") int batch,
                       @Value("${tape.synthetic-trading.match-delay-ms:2000}") long delay) {
-        super("tape-synthetic-matcher", delay, 1000);
+        super("tape-synthetic-matcher", delay, 1000, coordinator);
         this.orders = orders;
         this.quotes = quotes;
         this.metrics = metrics;

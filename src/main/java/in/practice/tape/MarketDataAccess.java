@@ -24,6 +24,7 @@ import static in.practice.tape.MarketDataProvider.Capability;
 final class MarketDataAccess {
     private final String owner;
     private final Set<Capability> approved;
+    private final Set<String> approvedExchanges;
     private final boolean local;
     private final boolean configured;
     private final Duration displayDelay;
@@ -34,9 +35,14 @@ final class MarketDataAccess {
         local = env.acceptsProfiles(Profiles.of("accounts-local"));
         owner = env.getProperty("TAPE_MARKET_OWNER_ID", "").strip();
         String reference = env.getProperty("TAPE_MARKET_PERMISSION_REF", "").strip();
+        approvedExchanges = Arrays.stream(env.getProperty("TAPE_MARKET_EXCHANGES", "").split(","))
+            .map(String::strip).filter(value -> !value.isEmpty()).map(value -> {
+                if (!Set.of("NSE", "BSE").contains(value)) throw new IllegalArgumentException("Invalid market-data exchange scope");
+                return value;
+            }).collect(Collectors.toUnmodifiableSet());
         String delay = env.getProperty("TAPE_MARKET_DISPLAY_DELAY", "").strip().toUpperCase(Locale.ROOT);
         displayDelay = parseDelay(delay);
-        approved = reference.isEmpty() || owner.isEmpty() || !local ? Set.of() :
+        approved = reference.isEmpty() || owner.isEmpty() || approvedExchanges.isEmpty() || !local ? Set.of() :
             Arrays.stream(env.getProperty("TAPE_MARKET_PERMISSIONS", "").split(","))
                 .map(String::strip).filter(value -> !value.isEmpty()).map(Capability::valueOf)
                 .filter(capability -> !INSTANT_DATA.contains(capability) || Duration.ZERO.equals(displayDelay))
@@ -66,6 +72,21 @@ final class MarketDataAccess {
 
     Set<Capability> capabilities(UUID user) {
         return owner.equals(user.toString()) ? approved : Set.of();
+    }
+
+    Set<String> exchanges(UUID user) { return capabilities(user).isEmpty() ? Set.of() : approvedExchanges; }
+
+    void requireExchange(UUID user, String exchange) {
+        if (!exchanges(user).contains(exchange)) throw failure(HttpStatus.FORBIDDEN, "MARKET_PERMISSION_REQUIRED");
+    }
+
+    String searchExchange(UUID user, String exchange, MarketDataProvider.Segment segment) {
+        if (segment == MarketDataProvider.Segment.FUTURES || segment == MarketDataProvider.Segment.OPTIONS) exchange = "NSE";
+        if (!exchange.isEmpty()) {
+            requireExchange(user, exchange);
+            return exchange;
+        }
+        return exchanges(user).size() == 1 ? exchanges(user).iterator().next() : "";
     }
 
     UUID catalogOwner() {

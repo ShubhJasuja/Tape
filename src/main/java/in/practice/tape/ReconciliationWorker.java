@@ -25,11 +25,11 @@ class ReconciliationWorker extends OperationsWorker {
     private final AtomicBoolean busy = new AtomicBoolean();
     private UUID cursor;
 
-    ReconciliationWorker(JdbcTemplate db, PaperOrders orders, TradingMetrics metrics,
+    ReconciliationWorker(JdbcTemplate db, PaperOrders orders, TradingMetrics metrics, WorkerCoordinator coordinator,
                          @Value("${tape.reconciliation.scheduled:true}") boolean scheduled,
                          @Value("${tape.reconciliation.batch-size:50}") int batch,
                          @Value("${tape.reconciliation.delay-ms:60000}") long delay) {
-        super("tape-reconciliation", delay, 1000);
+        super("tape-reconciliation", delay, 1000, coordinator);
         this.db = db;
         this.orders = orders;
         this.metrics = metrics;
@@ -38,9 +38,13 @@ class ReconciliationWorker extends OperationsWorker {
     }
 
     @Override public boolean isAutoStartup() { return scheduled; }
-    @Override void runOnce() { reconcileBatch(); }
+    @Override void runOnce() { runBatch(); }
 
     Result reconcileBatch() {
+        return coordinate(this::runBatch).orElseGet(() -> new Result(true, 0, 0, 0, false));
+    }
+
+    private Result runBatch() {
         if (!busy.compareAndSet(false, true)) return new Result(true, 0, 0, 0, false);
         try (var correlation = OperationsLog.correlation()) {
             int checked = 0, mismatches = 0, errors = 0;

@@ -68,4 +68,6 @@ When started from the project root with the default configuration, the database 
 
 See the [database guide](docs/database.md) for the Stage 2A PostgreSQL profile, migrations and tests, and [ADR 0001](docs/adr/0001-account-storage-and-ledger.md) for the multi-user design.
 
+See the [public launch checklist](docs/public-launch.md) for the multi-instance account foundation, remaining technical requirements, and market-data licensing.
+
 **Resume bullet:** Built an Indian-equity paper trading terminal with React, Spring Boot, and PostgreSQL, with an isolated virtual order ledger, a permission-gated market-data adapter tested against fixtures, and local AI summaries of computed research metrics.

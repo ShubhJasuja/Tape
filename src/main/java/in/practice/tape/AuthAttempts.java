@@ -4,6 +4,8 @@ import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
+import org.springframework.dao.DataAccessException;
+import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.web.filter.OncePerRequestFilter;
 
 import java.io.IOException;
@@ -14,55 +16,90 @@ final class AuthAttempts extends OncePerRequestFilter {
     private static final long WINDOW_MILLIS = 60_000;
     private static final int MAX_BUCKETS = 10_000;
     private final Map<String, Bucket> buckets = new HashMap<>();
+    private final AuthRequestBudget shared;
+    private final TradingMetrics metrics;
     private long nextCleanup;
 
     private record Bucket(long expiresAt, int used) {}
+
+    AuthAttempts(AuthRequestBudget shared, TradingMetrics metrics) {
+        this.shared = shared;
+        this.metrics = metrics;
+    }
 
     @Override
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain chain)
         throws ServletException, IOException {
         String path = request.getServletPath();
         long now = System.currentTimeMillis();
-        if ("GET".equals(request.getMethod()) && "/api/v1/auth/csrf".equals(path)
-            && !allow("csrf-ip:" + request.getRemoteAddr(), 90, now)) {
-            throttled(response);
-            return;
+        try {
+            if (admit(request, response, path, now)) chain.doFilter(request, response);
+        } catch (BudgetUnavailable unavailable) {
+            metrics.count("tape.auth.admission", "unavailable");
+            response.setStatus(503);
+        }
+    }
+
+    private boolean admit(HttpServletRequest request, HttpServletResponse response, String path, long now) {
+        if (path.startsWith("/api/v1/market-data/")) {
+            var authentication = SecurityContextHolder.getContext().getAuthentication();
+            if (authentication != null && authentication.getPrincipal() instanceof AccountDirectory.Principal user &&
+                !local("market-user:" + user.userId(), 120, now)) {
+                metrics.count("tape.market.admission", "limited");
+                return throttled(response);
+            }
+        }
+        if ("GET".equals(request.getMethod()) && "/api/v1/auth/csrf".equals(path)) {
+            return rate("csrf", request.getRemoteAddr(), 90, 900, now) || throttled(response);
         }
         boolean login = "/api/v1/auth/login".equals(path);
         boolean register = "/api/v1/auth/register".equals(path);
-        if (!"POST".equals(request.getMethod()) || (!login && !register)) {
-            chain.doFilter(request, response);
-            return;
+        if (!"POST".equals(request.getMethod()) || (!login && !register)) return true;
+        if (!rate(login ? "login" : "register", request.getRemoteAddr(), login ? 20 : 10, login ? 600 : 60, now)) {
+            return throttled(response);
         }
-        if (!allow((login ? "login-ip:" : "register-ip:") + request.getRemoteAddr(), login ? 20 : 10, now)) {
-            throttled(response);
-            return;
-        }
-        if (register && (request.getContentLengthLong() < 0 || request.getContentLengthLong() > 4096)) {
+        if (request.getContentLengthLong() < 0 || request.getContentLengthLong() > 4096) {
             response.setStatus(413);
-            return;
+            return false;
         }
-        if (login) {
-            String contentType = request.getContentType();
-            if (request.getQueryString() != null || contentType == null ||
-                !contentType.split(";", 2)[0].equalsIgnoreCase("application/x-www-form-urlencoded")) {
-                response.setStatus(401);
-                return;
-            }
-            String email = AccountDirectory.normalizedEmail(request.getParameter("email"));
-            if (email != null && !allow("login-email:" + email, 8, now)) {
-                throttled(response);
-                return;
-            }
-            if (email == null || !AccountDirectory.validPassword(request.getParameter("password"))) {
-                response.setStatus(401);
-                return;
-            }
+        if (!login) return true;
+        String contentType = request.getContentType();
+        if (request.getQueryString() != null || contentType == null ||
+            !contentType.split(";", 2)[0].equalsIgnoreCase("application/x-www-form-urlencoded")) {
+            response.setStatus(401);
+            return false;
         }
-        chain.doFilter(request, response);
+        String email = AccountDirectory.normalizedEmail(request.getParameter("email"));
+        if (email != null && !allow("login-email:" + email, 8, now)) {
+            return throttled(response);
+        }
+        if (email == null || !AccountDirectory.validPassword(request.getParameter("password"))) {
+            response.setStatus(401);
+            return false;
+        }
+        return true;
     }
 
-    private synchronized boolean allow(String key, int limit, long now) {
+    private boolean rate(String action, String address, int perAddress, int global, long now) {
+        // The local bucket sheds excess load before opening a database connection.
+        if (!local(action + "-ip:" + address, perAddress, now)) return false;
+        if (shared == null) return true;
+        return allow(action + "-global", global, now) && allow(action + "-ip:" + address, perAddress, now);
+    }
+
+    private boolean allow(String key, int limit, long now) {
+        if (shared == null) return local(key, limit, now);
+        try {
+            shared.prune(now);
+            return shared.allow(key, limit);
+        } catch (DataAccessException failure) {
+            throw new BudgetUnavailable();
+        }
+    }
+
+    private static final class BudgetUnavailable extends RuntimeException {}
+
+    private synchronized boolean local(String key, int limit, long now) {
         if (now >= nextCleanup) {
             buckets.values().removeIf(bucket -> bucket.expiresAt() <= now);
             nextCleanup = now + WINDOW_MILLIS;
@@ -78,8 +115,10 @@ final class AuthAttempts extends OncePerRequestFilter {
         return true;
     }
 
-    private static void throttled(HttpServletResponse response) {
+    private boolean throttled(HttpServletResponse response) {
+        metrics.count("tape.request.admission", "limited");
         response.setHeader("Retry-After", "60");
         response.setStatus(429);
+        return false;
     }
 }

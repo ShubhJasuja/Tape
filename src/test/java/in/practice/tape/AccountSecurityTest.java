@@ -300,6 +300,72 @@ class AccountSecurityTest {
     }
 
     @Test
+    void httpsSessionAndLogoutAreSharedByIndependentNodes() throws Exception {
+        String email = email();
+        try (var first = startApplication(false); var second = startApplication(false)) {
+            var a = new Browser(first);
+            var b = new Browser(second);
+            var bootstrap = a.proxy("GET", API + "/auth/csrf", null, "", null);
+            assertEquals(200, bootstrap.statusCode());
+            String before = sessionCookie(bootstrap);
+            var csrf = JSON.readTree(bootstrap.body());
+            var registration = JSON.writeValueAsString(Map.of("email", email, "password", PASSWORD));
+            assertEquals(201, a.proxy("POST", API + "/auth/register", before, registration, csrf).statusCode());
+            String form = "email=" + URLEncoder.encode(email, StandardCharsets.UTF_8) +
+                "&password=" + URLEncoder.encode(PASSWORD, StandardCharsets.UTF_8);
+            var login = a.proxy("POST", API + "/auth/login", before, form, csrf);
+            assertEquals(204, login.statusCode());
+            String signedIn = sessionCookie(login);
+            assertNotEquals(before, signedIn);
+            assertEquals(401, b.proxy("GET", API + "/auth/me", before, "", null).statusCode());
+            var restored = b.proxy("GET", API + "/auth/me", signedIn, "", null);
+            assertEquals(200, restored.statusCode());
+            assertEquals(email, JSON.readTree(restored.body()).path("email").asText());
+            assertEquals("DISCONNECTED", JSON.readTree(b.proxy("GET", API + "/market-data/status", signedIn, "", null).body())
+                .path("status").asText());
+            csrf = JSON.readTree(b.proxy("GET", API + "/auth/csrf", signedIn, "", null).body());
+            assertEquals(204, b.proxy("POST", API + "/auth/logout", signedIn, "", csrf).statusCode());
+            assertEquals(401, a.proxy("GET", API + "/accounts", signedIn, "", null).statusCode());
+        }
+    }
+
+    @Test
+    void readinessDetectsMissingRuntimeSessionGrants() {
+        var storage = local.getBean("accountStorage", org.springframework.boot.actuate.health.HealthIndicator.class);
+        assertEquals(org.springframework.boot.actuate.health.Status.UP, storage.health().getStatus());
+        owner.execute("REVOKE DELETE ON tape_http_session FROM tape_runtime");
+        try {
+            assertEquals(org.springframework.boot.actuate.health.Status.DOWN, storage.health().getStatus());
+        } finally {
+            owner.execute("GRANT DELETE ON tape_http_session TO tape_runtime");
+        }
+        assertEquals(org.springframework.boot.actuate.health.Status.UP, storage.health().getStatus());
+    }
+
+    @Test
+    void authenticationBudgetIsAtomicAndSharedBetweenRuntimeConnections() throws Exception {
+        var first = new AuthRequestBudget(new JdbcTemplate(runtimeDataSource()));
+        var second = new AuthRequestBudget(new JdbcTemplate(runtimeDataSource()));
+        var bucket = email();
+        try (var threads = java.util.concurrent.Executors.newFixedThreadPool(4)) {
+            var work = new java.util.ArrayList<java.util.concurrent.Callable<Boolean>>();
+            for (int i = 0; i < 16; i++) {
+                var budget = i % 2 == 0 ? first : second;
+                work.add(() -> budget.allow(bucket, 2));
+            }
+            int admitted = 0;
+            for (var result : threads.invokeAll(work)) if (result.get()) admitted++;
+            assertTrue(admitted >= 2 && admitted <= 4, "A clock-minute boundary can admit two requests in each of two windows");
+        }
+        assertEquals(0L, owner.queryForObject("SELECT count(*) FROM auth_request_budget WHERE octet_length(bucket) <> 32", Long.class));
+    }
+
+    private static String sessionCookie(HttpResponse<String> response) {
+        return response.headers().allValues("Set-Cookie").stream().filter(value -> value.startsWith("JSESSIONID="))
+            .map(value -> value.split(";", 2)[0]).findFirst().orElseThrow();
+    }
+
+    @Test
     void providerMarketDataRequiresAuthenticationAndExplicitLocalEntitlement() throws Exception {
         var anonymous = new Browser(local);
         var alice = registered(email());
@@ -317,7 +383,7 @@ class AccountSecurityTest {
         new ResourceDatabasePopulator(new FileSystemResource("docs/market-data-runtime-grants.sql")).execute(owner.getDataSource());
         try (var market = startApplication(true, false, false, Map.of("TAPE_MARKET_OWNER_ID", ownerId.toString(),
             "TAPE_MARKET_PERMISSION_REF", "test-gate", "TAPE_MARKET_PERMISSIONS", "WATCHLIST,QUOTES", "TAPE_MARKET_DISPLAY_DELAY", "NONE",
-            "UPSTOX_ANALYTICS_TOKEN", ""))) {
+            "TAPE_MARKET_EXCHANGES", "NSE,BSE", "UPSTOX_ANALYTICS_TOKEN", ""))) {
             var client = new Browser(market);
             assertEquals(204, client.login(ownerEmail, PASSWORD).statusCode());
             assertEquals("TOKEN_REQUIRED", JSON.readTree(client.get(routes + "/status").body()).path("status").asText());
@@ -490,6 +556,16 @@ class AccountSecurityTest {
 
         HttpResponse<String> send(HttpRequest request) throws Exception {
             return http.send(request, HttpResponse.BodyHandlers.ofString());
+        }
+
+        HttpResponse<String> proxy(String method, String path, String cookie, String body, JsonNode csrf) throws Exception {
+            var request = HttpRequest.newBuilder(base.resolve(path)).header("X-Forwarded-Proto", "https")
+                .header("X-Forwarded-For", "198.51.100.33").method(method, HttpRequest.BodyPublishers.ofString(body));
+            if (cookie != null) request.header("Cookie", cookie);
+            if (path.endsWith("/login")) request.header("Content-Type", "application/x-www-form-urlencoded");
+            if (path.endsWith("/register")) request.header("Content-Type", "application/json");
+            if (csrf != null) request.header(csrf.path("headerName").asText(), csrf.path("token").asText());
+            return send(request.build());
         }
     }
 }

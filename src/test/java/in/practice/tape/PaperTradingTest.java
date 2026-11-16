@@ -102,6 +102,53 @@ class PaperTradingTest {
     }
 
     @Test
+    void concurrentUsersCanSpendTheirOwnWalletsWithTheSameRequestId() throws Exception {
+        var alice = account();
+        var bob = account();
+        var sharedId = UUID.randomUUID();
+        var aliceTicket = new PaperOrders.Ticket(sharedId, SYMBOL, "BUY", "MARKET", 1, null);
+        var bobTicket = new PaperOrders.Ticket(sharedId, SYMBOL, "BUY", "MARKET", 3, null);
+        var result = race(() -> submit(first, alice, aliceTicket), () -> submit(second, bob, bobTicket));
+        assertStates(result, "FILLED", "FILLED");
+        assertNotEquals(result.get(0).id(), result.get(1).id());
+        assertEquals(START - 10_005, second.wallet(alice.owner, alice.account).balancePaise());
+        assertEquals(START - 30_015, first.wallet(bob.owner, bob.account).balancePaise());
+        assertEquals(404, assertThrows(ResponseStatusException.class, () -> first.wallet(alice.owner, bob.account)).getStatusCode().value());
+        assertEquals(result.get(0).id(), submit(second, alice, aliceTicket).id());
+        assertEquals(result.get(1).id(), submit(first, bob, bobTicket).id());
+        assertEquals(1, executions(alice));
+        assertEquals(1, executions(bob));
+        assertHealthy(alice);
+        assertHealthy(bob);
+    }
+
+    @Test
+    void workerCoordinationSkipsAnotherInstanceThenRecoversAfterRollback() throws Exception {
+        var registry = new io.micrometer.core.instrument.simple.SimpleMeterRegistry();
+        try (var executor = Executors.newSingleThreadExecutor()) {
+            var a = new WorkerCoordinator(AccountSecurityTest.runtimeDataSource(), new TradingMetrics(registry));
+            var b = new WorkerCoordinator(AccountSecurityTest.runtimeDataSource(), new TradingMetrics(registry));
+            var entered = new CountDownLatch(1);
+            var release = new CountDownLatch(1);
+            var inFlight = executor.submit(() -> assertThrows(IllegalStateException.class, () -> a.run("fixture-worker", () -> {
+                entered.countDown();
+                try { assertTrue(release.await(5, TimeUnit.SECONDS)); }
+                catch (InterruptedException error) { throw new IllegalStateException(error); }
+                throw new IllegalStateException("interrupted work");
+            })));
+            try {
+                assertTrue(entered.await(5, TimeUnit.SECONDS));
+                assertTrue(b.run("fixture-worker", () -> fail("Concurrent scan entered")).isEmpty());
+                assertEquals(1, b.run("different-work", () -> 1).orElseThrow());
+            } finally { release.countDown(); }
+            inFlight.get(5, TimeUnit.SECONDS);
+            var restarted = new WorkerCoordinator(AccountSecurityTest.runtimeDataSource(), new TradingMetrics(registry));
+            assertEquals(2, restarted.run("fixture-worker", () -> 2).orElseThrow());
+            assertEquals(1, registry.get("tape.worker.runs").tags("outcome", "busy", "worker", "fixture-worker").counter().count());
+        } finally { registry.close(); }
+    }
+
+    @Test
     void simultaneousBuysCannotOverspend() throws Exception {
         var a = account();
         var result = race(() -> submit(first, a, ticket("BUY", "MARKET", 6_000, null)),

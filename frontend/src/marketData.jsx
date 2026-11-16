@@ -81,6 +81,7 @@ export default function MarketData({ signOut, Chart }) {
 
   const status = useRead(read, '/status');
   const capabilities = status.data?.capabilities || empty;
+  const exchanges = status.data?.exchanges || ['NSE', 'BSE'];
   const ready = status.data?.status === 'CONFIGURED';
   const can = name => ready && capabilities.includes(name);
   const [search, setSearch] = useState('');
@@ -96,6 +97,7 @@ export default function MarketData({ signOut, Chart }) {
   const [chainDetail, setChainDetail] = useState(false);
   const [streaming, setStreaming] = useState(false);
   const [stream, setStream] = useState(null);
+  const [streamTab] = useState(() => crypto.randomUUID());
   const [now, setNow] = useState(Date.now);
   const [revision, setRevision] = useState(0);
   const [pinError, setPinError] = useState('');
@@ -149,7 +151,7 @@ export default function MarketData({ signOut, Chart }) {
     async function poll() {
       try {
         if (!document.hidden) {
-          const data = await read('/streams' + params({ keys: streamKeys }), controller.signal);
+          const data = await read('/streams' + params({ keys: streamKeys, tab: streamTab }), controller.signal);
           if (!controller.signal.aborted) setStream({ keys: streamKeys, ...data });
         }
       } catch (failure) {
@@ -159,7 +161,7 @@ export default function MarketData({ signOut, Chart }) {
     }
     poll();
     return () => { clearTimeout(timer); controller.abort(); };
-  }, [read, streamEnabled, streamKeys]);
+  }, [read, streamEnabled, streamKeys, streamTab]);
 
   const tick = streamEnabled && stream?.keys === streamKeys ? stream : null;
   const snap = snapshot.data;
@@ -245,7 +247,7 @@ export default function MarketData({ signOut, Chart }) {
         <div className="provider-segments" role="group" aria-label="Provider segment">
           {[['EQUITY', 'Equities'], ['INDEX', 'Indices'], ['FUTURES', 'Futures'], ['OPTIONS', 'Options']].map(([code, label]) =>
             <button type="button" key={code} className="quiet" aria-pressed={segment === code} onClick={() => switchSegment(code)}
-              disabled={!can('CATALOG') || (['FUTURES', 'OPTIONS'].includes(code) && !can('DERIVATIVES'))}>{label}</button>)}
+              disabled={!can('CATALOG') || (['FUTURES', 'OPTIONS'].includes(code) && (!can('DERIVATIVES') || !exchanges.includes('NSE')))}>{label}</button>)}
         </div>
         <label className="search"><Search size={16}/><input aria-label="Find provider instruments" placeholder="Symbol or company"
           maxLength={50} value={search} disabled={!can('CATALOG')} onChange={e => { setPage(1); setSearch(e.target.value); }}
@@ -254,12 +256,12 @@ export default function MarketData({ signOut, Chart }) {
           <select aria-label="Provider exchange" value={exchange} disabled={!can('CATALOG')}
             onChange={e => { setPage(1); setExchange(e.target.value); }}>
             <option value="">{derivatives ? 'NSE' : 'All exchanges'}</option>
-            {!derivatives && <><option>NSE</option><option>BSE</option></>}
+            {!derivatives && exchanges.slice().sort().map(listed => <option key={listed}>{listed}</option>)}
           </select>
           {derivatives && <input type="date" min={today} aria-label="Filter contracts by expiry" value={searchExpiry}
             onChange={e => { setPage(1); setSearchExpiry(e.target.value); }}/>}
         </div>
-        {segment !== 'EQUITY' && can('CATALOG') && <div className="catalog-filters">
+        {segment !== 'EQUITY' && can('CATALOG') && exchanges.includes('NSE') && <div className="catalog-filters">
           {['Nifty 50', 'Bank Nifty'].map(name => <button key={name} type="button" className="quiet"
             onClick={() => { setExchange('NSE'); setPage(1); setSearch(name); }}>{name}</button>)}
         </div>}

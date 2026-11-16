@@ -33,7 +33,7 @@ class MatcherReliabilityTest {
         }).when(engine).match(first);
         var registry = new SimpleMeterRegistry();
         try (var executor = Executors.newSingleThreadExecutor()) {
-            var matcher = new PaperOrderMatcher(engine, new SyntheticQuotes(), new TradingMetrics(registry), 2, 1000);
+            var matcher = new PaperOrderMatcher(engine, new SyntheticQuotes(), new TradingMetrics(registry), mock(WorkerCoordinator.class), 2, 1000);
             var run = executor.submit(matcher::runOnce);
             try {
                 assertTrue(entered.await(5, TimeUnit.SECONDS));
