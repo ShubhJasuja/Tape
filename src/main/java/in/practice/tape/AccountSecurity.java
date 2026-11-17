@@ -36,12 +36,24 @@ class AccountSecurity {
     PasswordEncoder accountPasswordEncoder() { return new BCryptPasswordEncoder(12); }
 
     @Bean
+    HealthIndicator identityDelivery(IdentityActions identities, Environment environment) {
+        return () -> environment.acceptsProfiles(Profiles.of("accounts-local")) || identities.ready()
+            ? Health.up().build() : Health.down().build();
+    }
+
+    @Bean
     HealthIndicator accountStorage(JdbcTemplate db) {
         return () -> {
             try {
                 Boolean usable = db.queryForObject("""
                     SELECT bool_and(coalesce(has_table_privilege(to_regclass(table_name), permission), false))
-                    FROM (VALUES ('tape_http_session'), ('tape_http_session_attributes'), ('auth_request_budget')) AS tables(table_name)
+                        AND has_table_privilege('identity_actions','SELECT')
+                        AND has_table_privilege('identity_actions','INSERT')
+                        AND has_table_privilege('identity_actions','DELETE')
+                        AND has_column_privilege('local_credentials','password_hash','UPDATE')
+                        AND has_column_privilege('local_credentials','verified_at','UPDATE')
+                        AND has_column_privilege('local_credentials','auth_version','UPDATE')
+                    FROM (VALUES ('tape_http_session'), ('tape_http_session_attributes'), ('auth_request_budget'), ('identity_mail')) AS tables(table_name)
                     CROSS JOIN (VALUES ('SELECT'), ('INSERT'), ('UPDATE'), ('DELETE')) AS required(permission)
                     """, Boolean.class);
                 return Boolean.TRUE.equals(usable) ? Health.up().build() : Health.down().build();
@@ -80,13 +92,21 @@ class AccountSecurity {
         }
         var provider = new DaoAuthenticationProvider(directory::load);
         provider.setPasswordEncoder(encoder);
+        provider.setPreAuthenticationChecks(details -> {});
+        provider.setPostAuthenticationChecks(details -> {
+            if (!details.isEnabled()) throw new org.springframework.security.authentication.BadCredentialsException("Invalid credentials");
+        });
         return http
             .authenticationProvider(provider)
+            .headers(headers -> headers.referrerPolicy(policy -> policy.policy(
+                org.springframework.security.web.header.writers.ReferrerPolicyHeaderWriter.ReferrerPolicy.NO_REFERRER)))
             .requestCache(cache -> cache.disable())
             .authorizeHttpRequests(auth -> auth
                 .dispatcherTypeMatchers(DispatcherType.ERROR).permitAll()
                 .requestMatchers(HttpMethod.GET, "/", "/index.html", "/assets/**", "/api/v1/auth/csrf").permitAll()
-                .requestMatchers(HttpMethod.POST, "/api/v1/auth/register", "/api/v1/auth/login").permitAll()
+                .requestMatchers(HttpMethod.POST, "/api/v1/auth/register", "/api/v1/auth/login", "/api/v1/auth/verification",
+                    "/api/v1/auth/recovery", "/api/v1/auth/verify", "/api/v1/auth/reset").permitAll()
+                .requestMatchers(HttpMethod.POST, "/api/v1/auth/sessions/revoke").authenticated()
                 .requestMatchers(HttpMethod.GET, "/api/v1/auth/me", "/api/v1/accounts", "/api/v1/accounts/*").authenticated()
                 .requestMatchers(HttpMethod.GET, "/api/v1/accounts/*/orders", "/api/v1/accounts/*/orders/*",
                     "/api/v1/accounts/*/order-requests/*", "/api/v1/accounts/*/wallet", "/api/v1/accounts/*/portfolio",
@@ -118,6 +138,28 @@ class AccountSecurity {
                 .failureHandler((request, response, failure) -> response.setStatus(401)))
             .logout(logout -> logout.logoutUrl("/api/v1/auth/logout").deleteCookies("JSESSIONID")
                 .logoutSuccessHandler((request, response, authentication) -> response.setStatus(204)))
+            .addFilterBefore(new OncePerRequestFilter() {
+                @Override protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain chain)
+                    throws ServletException, IOException {
+                    var context = org.springframework.security.core.context.SecurityContextHolder.getContext();
+                    if (context.getAuthentication() != null &&
+                        context.getAuthentication().getPrincipal() instanceof AccountDirectory.Principal principal) {
+                        try {
+                            if (!directory.current(principal)) {
+                                var session = request.getSession(false);
+                                if (session != null) session.invalidate();
+                                org.springframework.security.core.context.SecurityContextHolder.clearContext();
+                                response.setStatus(401);
+                                return;
+                            }
+                        } catch (org.springframework.dao.DataAccessException failure) {
+                            response.setStatus(503);
+                            return;
+                        }
+                    }
+                    chain.doFilter(request, response);
+                }
+            }, UsernamePasswordAuthenticationFilter.class)
             .addFilterBefore(new AuthAttempts(local ? null : authBudget, metrics), UsernamePasswordAuthenticationFilter.class)
             .build();
     }

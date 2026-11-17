@@ -70,4 +70,6 @@ See the [database guide](docs/database.md) for the Stage 2A PostgreSQL profile, 
 
 See the [public launch checklist](docs/public-launch.md) for the multi-instance account foundation, remaining technical requirements, and market-data licensing.
 
+The [identity readiness guide](docs/identity-readiness.md) covers verified email, password recovery, shared-session revocation, SMTP configuration, and PostgreSQL backup and restore checks.
+
 **Resume bullet:** Built an Indian-equity paper trading terminal with React, Spring Boot, and PostgreSQL, with an isolated virtual order ledger, a permission-gated market-data adapter tested against fixtures, and local AI summaries of computed research metrics.

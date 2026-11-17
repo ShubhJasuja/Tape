@@ -1,6 +1,8 @@
 package in.practice.tape;
 
 import org.springframework.context.annotation.Profile;
+import org.springframework.core.env.Environment;
+import org.springframework.core.env.Profiles;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -35,26 +37,31 @@ class AccountDirectory {
     static final class Principal extends User {
         @java.io.Serial private static final long serialVersionUID = 1L;
         private final UUID userId;
+        private final long authVersion;
 
-        Principal(UUID userId, String email, String passwordHash) {
-            super(email, passwordHash, List.of());
+        Principal(UUID userId, String email, String passwordHash, long authVersion, boolean enabled) {
+            super(email, passwordHash, enabled, true, true, true, List.of());
             this.userId = userId;
+            this.authVersion = authVersion;
         }
 
         UUID userId() { return userId; }
+        long authVersion() { return authVersion; }
     }
 
     private final JdbcTemplate db;
     private final boolean demoTrading;
     private final TransactionTemplate transactions;
     private final PasswordEncoder passwords;
+    private final boolean local;
 
     AccountDirectory(JdbcTemplate db, TransactionTemplate transactions, PasswordEncoder passwords,
-                     @Value("${tape.synthetic-trading.enabled:false}") boolean demoTrading) {
+                     @Value("${tape.synthetic-trading.enabled:false}") boolean demoTrading, Environment environment) {
         this.db = db;
         this.demoTrading = demoTrading;
         this.transactions = transactions;
         this.passwords = passwords;
+        this.local = environment.acceptsProfiles(Profiles.of("accounts-local"));
     }
 
     void register(Registration registration) {
@@ -63,7 +70,12 @@ class AccountDirectory {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST);
         }
         String hash = passwords.encode(registration.password());
+        registerHashed(email, hash);
+    }
+
+    void registerHashed(String email, String hash) {
         transactions.executeWithoutResult(ignored -> {
+            lockIdentity(email);
             UUID userId = UUID.randomUUID();
             db.update("INSERT INTO users (id,identity_issuer,identity_subject) VALUES (?,'tape-local',?)",
                 userId, userId.toString());
@@ -83,14 +95,32 @@ class AccountDirectory {
         });
     }
 
+    void lockIdentity(String email) {
+        db.queryForObject("SELECT pg_advisory_xact_lock(hashtextextended(?, 1230193998))", Object.class, email);
+    }
+
     Principal load(String rawEmail) {
         String email = normalizedEmail(rawEmail);
         if (email != null) {
-            var records = db.query("SELECT user_id,email,password_hash FROM local_credentials WHERE email=?",
-                (rs, row) -> new Principal(rs.getObject(1, UUID.class), rs.getString(2), rs.getString(3)), email);
+            var records = db.query("SELECT user_id,email,password_hash,auth_version,verified_at FROM local_credentials WHERE email=?",
+                (rs, row) -> new Principal(rs.getObject(1, UUID.class), rs.getString(2), rs.getString(3), rs.getLong(4),
+                    local || rs.getTimestamp(5) != null), email);
             if (!records.isEmpty()) return records.getFirst();
         }
         throw new UsernameNotFoundException("Invalid credentials");
+    }
+
+    boolean current(Principal principal) {
+        return Boolean.TRUE.equals(db.queryForObject("""
+            SELECT EXISTS(SELECT 1 FROM local_credentials WHERE user_id=? AND auth_version=? AND (? OR verified_at IS NOT NULL))
+            """, Boolean.class, principal.userId(), principal.authVersion(), local));
+    }
+
+    void revoke(UUID owner) {
+        transactions.executeWithoutResult(ignored -> {
+            db.update("UPDATE local_credentials SET auth_version=auth_version+1 WHERE user_id=?", owner);
+            db.update("DELETE FROM tape_http_session WHERE principal_name=(SELECT email FROM local_credentials WHERE user_id=?)", owner);
+        });
     }
 
     List<Account> accounts(UUID owner) { return read(ACCOUNTS + " ORDER BY a.mode", owner); }

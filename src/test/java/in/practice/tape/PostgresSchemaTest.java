@@ -80,7 +80,7 @@ class PostgresSchemaTest {
         var owner = user();
         try (var application = startApplication()) {
             assertIsolatedDataSources(application);
-            assertEquals(List.of("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11"), pg.queryForList(
+            assertEquals(List.of("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12"), pg.queryForList(
                 "SELECT version FROM flyway_schema_history WHERE success ORDER BY installed_rank", String.class));
             assertEquals(1L, count("SELECT count(*) FROM users WHERE id = ?", owner));
             assertEquals("NSE:RELIANCE", pg.queryForObject("SELECT requested_symbol FROM orders WHERE id=? AND instrument_id=?",
@@ -112,6 +112,38 @@ class PostgresSchemaTest {
         fails("23505", () -> pg.update(pin, owner));
         pg.update("DELETE FROM market_watchlists WHERE user_id=? AND source='UPSTOX' AND name='Indices'", owner);
         assertEquals(0L, count("SELECT count(*) FROM market_watchlist WHERE user_id=?", owner));
+    }
+
+    @Test
+    void databaseBackupRestoresAllSchemaAndRecordCountsIntoAnIndependentDatabase() throws Exception {
+        String restored = "restore_" + UUID.randomUUID().toString().replace("-", "");
+        String file = "/tmp/" + restored + ".dump";
+        assertEquals(0, POSTGRES.execInContainer("pg_dump", "-U", POSTGRES.getUsername(), "-d", POSTGRES.getDatabaseName(),
+            "--format=custom", "--file=" + file).getExitCode());
+        assertEquals(0, POSTGRES.execInContainer("createdb", "-U", POSTGRES.getUsername(), restored).getExitCode());
+        try {
+            var result = POSTGRES.execInContainer("pg_restore", "--exit-on-error", "--no-owner", "--no-acl",
+                "-U", POSTGRES.getUsername(), "-d", restored, file);
+            assertEquals(0, result.getExitCode(), result.getStderr());
+            var copy = new JdbcTemplate(new DriverManagerDataSource(
+                POSTGRES.getJdbcUrl().replace("/" + POSTGRES.getDatabaseName(), "/" + restored),
+                POSTGRES.getUsername(), POSTGRES.getPassword()));
+            for (String table : pg.queryForList("""
+                SELECT table_name FROM information_schema.tables WHERE table_schema='public' AND table_type='BASE TABLE'
+                """, String.class)) {
+                assertTrue(table.matches("[a-z_][a-z0-9_]*"));
+                assertEquals(pg.queryForObject("SELECT count(*) FROM public." + table, Long.class),
+                    copy.queryForObject("SELECT count(*) FROM public." + table, Long.class), table);
+            }
+            assertEquals(12, copy.queryForObject("SELECT count(*) FROM flyway_schema_history WHERE success", Integer.class));
+            assertEquals(existingAccount, copy.queryForObject("SELECT account_id FROM orders WHERE id=?", UUID.class, existingOrder));
+            var integrity = POSTGRES.execInContainer("pg_amcheck", "--install-missing", "--heapallindexed",
+                "-U", POSTGRES.getUsername(), restored);
+            assertEquals(0, integrity.getExitCode(), integrity.getStderr());
+        } finally {
+            POSTGRES.execInContainer("dropdb", "-U", POSTGRES.getUsername(), restored);
+            POSTGRES.execInContainer("rm", "-f", file);
+        }
     }
 
     @Test

@@ -54,8 +54,10 @@ final class AuthAttempts extends OncePerRequestFilter {
         }
         boolean login = "/api/v1/auth/login".equals(path);
         boolean register = "/api/v1/auth/register".equals(path);
-        if (!"POST".equals(request.getMethod()) || (!login && !register)) return true;
-        if (!rate(login ? "login" : "register", request.getRemoteAddr(), login ? 20 : 10, login ? 600 : 60, now)) {
+        boolean identity = java.util.Set.of("/api/v1/auth/verification", "/api/v1/auth/recovery",
+            "/api/v1/auth/verify", "/api/v1/auth/reset").contains(path);
+        if (!"POST".equals(request.getMethod()) || (!login && !register && !identity)) return true;
+        if (!rate(login ? "login" : identity ? "identity" : "register", request.getRemoteAddr(), login ? 20 : 10, login ? 600 : 60, now)) {
             return throttled(response);
         }
         if (request.getContentLengthLong() < 0 || request.getContentLengthLong() > 4096) {
