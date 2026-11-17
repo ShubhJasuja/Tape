@@ -633,6 +633,7 @@ class AccountSecurityTest {
             settings.put("server.tomcat.remoteip.internal-proxies", "127\\.0\\.0\\.1");
         }
         settings.put("TAPE_RECONCILIATION_SCHEDULED", false);
+        settings.put("tape.identity.mail.enabled", false);
         settings.putAll(overrides);
         Object mail = settings.remove("TEST_MAIL_SENDER");
         return new SpringApplicationBuilder(Tape.class).profiles(profiles)

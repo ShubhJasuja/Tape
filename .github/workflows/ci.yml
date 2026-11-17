@@ -15,6 +15,7 @@ jobs:
     env:
       UPSTOX_ANALYTICS_TOKEN: ''
       OLLAMA_MODEL: ''
+      TAPE_IDENTITY_MAIL_ENABLED: 'false'
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
