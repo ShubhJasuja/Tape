@@ -62,6 +62,10 @@ final class UpstoxQuoteStream implements AutoCloseable {
 
     synchronized MarketDataProvider.Streams read(Set<String> keys) {
         var now = clock.instant();
+        if (keys.isEmpty()) {
+            disconnect();
+            return new MarketDataProvider.Streams("DISCONNECTED", Map.of());
+        }
         if (closed) return new MarketDataProvider.Streams("DISCONNECTED", Map.of());
         if (active == null) active = new Session();
         Session session = active;

@@ -96,10 +96,11 @@ class ProviderCatalogImport {
                 if (segment == MarketDataProvider.Segment.FUTURES || segment == MarketDataProvider.Segment.OPTIONS) {
                     access.require(owner, MarketDataProvider.Capability.DERIVATIVES);
                 }
+                String exchange = access.searchExchange(owner, "", segment);
                 int page = 1;
                 var instruments = new java.util.LinkedHashMap<String, MarketDataProvider.Instrument>();
                 while (true) {
-                    var result = provider.search(query, "", segment, null, page);
+                    var result = provider.search(query, exchange, segment, null, page);
                     for (var item : result.instruments()) {
                         var previous = instruments.putIfAbsent(item.key(), item);
                         if (previous != null && !previous.equals(item)) throw MarketDataAccess.invalid();

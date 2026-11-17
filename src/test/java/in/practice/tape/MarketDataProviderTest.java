@@ -235,6 +235,7 @@ class MarketDataProviderTest {
     void gateNeedsLocalProfileOwnerPermissionReferenceAndToken() {
         UUID owner = UUID.randomUUID();
         var env = new MockEnvironment().withProperty("TAPE_MARKET_OWNER_ID", owner.toString())
+            .withProperty("TAPE_MARKET_EXCHANGES", "NSE")
             .withProperty("TAPE_MARKET_PERMISSIONS", "QUOTES,STREAM");
         env.setActiveProfiles("accounts", "accounts-local");
         assertEquals("DISCONNECTED", new MarketDataAccess(env).status(owner));
@@ -249,6 +250,11 @@ class MarketDataProviderTest {
         env.setProperty("UPSTOX_ANALYTICS_TOKEN", "test-only");
         var access = new MarketDataAccess(env);
         access.require(owner, Capability.QUOTES);
+        assertEquals("NSE", access.searchExchange(owner, "", Segment.EQUITY));
+        assertEquals("MARKET_PERMISSION_REQUIRED", code(() -> access.requireExchange(owner, "BSE")));
+        env.setProperty("TAPE_MARKET_EXCHANGES", "");
+        assertEquals("DISCONNECTED", new MarketDataAccess(env).status(owner));
+        env.setProperty("TAPE_MARKET_EXCHANGES", "NSE");
         assertEquals("MARKET_PERMISSION_REQUIRED", code(() -> access.require(UUID.randomUUID(), Capability.QUOTES)));
         assertEquals("MARKET_PERMISSION_REQUIRED", code(() -> access.require(owner, Capability.HISTORY)));
         env.setActiveProfiles("accounts");
@@ -259,6 +265,7 @@ class MarketDataProviderTest {
     void embargoAllowsOnlyHistoryAndCutsOffAtACompleteIstDay() {
         UUID owner = UUID.randomUUID();
         var env = new MockEnvironment().withProperty("TAPE_MARKET_OWNER_ID", owner.toString())
+            .withProperty("TAPE_MARKET_EXCHANGES", "NSE")
             .withProperty("TAPE_MARKET_PERMISSION_REF", "test-confirmation")
             .withProperty("TAPE_MARKET_PERMISSIONS", "QUOTES,HISTORY,INTRADAY,STREAM,OPTION_CHAIN,CALENDAR")
             .withProperty("TAPE_MARKET_DISPLAY_DELAY", "P30D")
@@ -316,6 +323,38 @@ class MarketDataProviderTest {
             assertEquals(NOW.plusSeconds(3), stream.read(KEY).quote().receivedAt());
             assertEquals(2, authorizations.get());
         }
+    }
+
+    @Test
+    void expiringStreamLeasesDoNotOverwriteOrExposeTheOtherTabOrUser() {
+        String index = "BSE_INDEX|Fixture Index";
+        var now = new AtomicReference<>(NOW);
+        var provider = mock(MarketDataProvider.class);
+        var quote = mock(Quote.class);
+        when(provider.streams(anySet())).thenAnswer(request -> {
+            Set<String> keys = request.getArgument(0);
+            return new Streams("CONNECTED", keys.stream().collect(java.util.stream.Collectors.toMap(key -> key, key -> quote)));
+        });
+        var registry = new io.micrometer.core.instrument.simple.SimpleMeterRegistry();
+        try {
+            var subscriptions = new MarketStreamSubscriptions(provider, new TradingMetrics(registry), changingClock(now));
+            UUID owner = UUID.randomUUID(), other = UUID.randomUUID(), tab = UUID.randomUUID();
+            var alice = new MarketStreamSubscriptions.Client(owner, "first-session", tab);
+            var secondTab = new MarketStreamSubscriptions.Client(owner, "first-session", UUID.randomUUID());
+            var bob = new MarketStreamSubscriptions.Client(other, "second-session", tab);
+            assertEquals(Set.of(KEY), subscriptions.read(alice, Set.of(KEY)).quotes().keySet());
+            assertEquals(Set.of(index), subscriptions.read(secondTab, Set.of(index)).quotes().keySet());
+            assertEquals(Set.of(index), subscriptions.read(bob, Set.of(index)).quotes().keySet());
+            verify(provider, times(2)).streams(Set.of(KEY, index));
+            now.set(NOW.plusSeconds(12));
+            assertEquals(Set.of(index), subscriptions.read(bob, Set.of(index)).quotes().keySet());
+            when(provider.streams(Set.of(index))).thenReturn(new Streams("DISCONNECTED", Map.of()));
+            now.set(NOW.plusSeconds(16));
+            var outage = subscriptions.read(bob, Set.of(index));
+            assertEquals("DISCONNECTED", outage.status());
+            assertTrue(outage.quotes().isEmpty());
+            verify(provider, times(2)).streams(Set.of(index));
+        } finally { registry.close(); }
     }
 
     @Test

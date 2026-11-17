@@ -33,6 +33,7 @@ class AccountDirectory {
                    boolean tradingEnabled) {}
 
     static final class Principal extends User {
+        @java.io.Serial private static final long serialVersionUID = 1L;
         private final UUID userId;
 
         Principal(UUID userId, String email, String passwordHash) {

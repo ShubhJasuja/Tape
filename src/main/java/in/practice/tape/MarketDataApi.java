@@ -1,6 +1,7 @@
 
 package in.practice.tape;
 
+import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.context.annotation.Profile;
 import org.springframework.http.CacheControl;
 import org.springframework.http.HttpStatus;
@@ -16,6 +17,7 @@ import java.util.Arrays;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.UUID;
 
 import static in.practice.tape.MarketDataProvider.*;
 import static in.practice.tape.MarketDataAccess.*;
@@ -28,25 +30,32 @@ final class MarketDataApi {
     private final MarketDataAccess access;
     private final JdbcTemplate db;
     private final ProviderCatalog catalog;
+    private final MarketStreamSubscriptions subscriptions;
 
     static final int STREAM_LIMIT = 16;
     private static final String DEFAULT_LIST = "Default";
-    record Status(String source, String status, Set<Capability> capabilities, List<Interval> intervals, String displayDelay) {}
+    private static final UUID SINGLE_LEGACY_TAB = new UUID(0, 1);
+    private static final UUID BATCH_LEGACY_TAB = new UUID(0, 2);
+    record Status(String source, String status, Set<Capability> capabilities, List<Interval> intervals, String displayDelay,
+                  Set<String> exchanges) {}
     record Watch(String instrumentKey) {}
     record Watchlist(String name) {}
 
-    MarketDataApi(MarketDataProvider provider, MarketDataAccess access, JdbcTemplate db, ProviderCatalog catalog) {
+    MarketDataApi(MarketDataProvider provider, MarketDataAccess access, JdbcTemplate db, ProviderCatalog catalog,
+                  MarketStreamSubscriptions subscriptions) {
         this.provider = provider;
         this.access = access;
         this.db = db;
         this.catalog = catalog;
+        this.subscriptions = subscriptions;
     }
 
     @GetMapping("/status")
     ResponseEntity<Status> status(@AuthenticationPrincipal AccountDirectory.Principal user) {
         Set<Capability> capabilities = access.capabilities(user.userId());
         return response(new Status(provider.source(), access.status(user.userId()), capabilities,
-            capabilities.contains(Capability.HISTORY) ? Arrays.asList(Interval.values()) : List.of(), access.displayDelay(user.userId())));
+            capabilities.contains(Capability.HISTORY) ? Arrays.asList(Interval.values()) : List.of(),
+            access.displayDelay(user.userId()), access.exchanges(user.userId())));
     }
 
     @GetMapping("/instruments")
@@ -59,7 +68,7 @@ final class MarketDataApi {
         if (((segment == Segment.FUTURES || segment == Segment.OPTIONS) && "BSE".equals(exchange)) ||
             (expiry != null && segment != Segment.OPTIONS && segment != Segment.FUTURES)) throw invalid();
         if (expiry != null) activeExpiry(expiry, today());
-        return response(provider.search(query(q), exchangeFilter(exchange), segment, expiry, page));
+        return response(provider.search(query(q), access.searchExchange(user.userId(), exchangeFilter(exchange), segment), segment, expiry, page));
     }
 
     @GetMapping("/instrument")
@@ -88,6 +97,7 @@ final class MarketDataApi {
                                                @RequestParam(required = false) LocalDate expiry) {
         access.require(user.userId(), Capability.CATALOG);
         access.require(user.userId(), Capability.DERIVATIVES);
+        access.requireExchange(user.userId(), "NSE");
         if (expiry != null) activeExpiry(expiry, today());
         return response(provider.options(underlying(key), expiry));
     }
@@ -97,6 +107,7 @@ final class MarketDataApi {
                                 @RequestParam LocalDate expiry) {
         access.require(user.userId(), Capability.OPTION_CHAIN);
         access.require(user.userId(), Capability.DERIVATIVES);
+        access.requireExchange(user.userId(), "NSE");
         return response(provider.chain(underlying(key), activeExpiry(expiry, today())));
     }
 
@@ -112,6 +123,7 @@ final class MarketDataApi {
                                                                    @RequestParam String exchange) {
         access.require(user.userId(), Capability.QUOTES);
         if (exchangeFilter(exchange).isEmpty()) throw invalid();
+        access.requireExchange(user.userId(), exchange);
         return response(java.util.Map.of("source", provider.source(), "exchange", exchange, "status", provider.marketStatus(exchange)));
     }
 
@@ -143,18 +155,22 @@ final class MarketDataApi {
         access.require(user.userId(), Capability.CALENDAR);
         if (!Set.of("NSE", "BSE", "NFO").contains(exchange)) throw invalid();
         if ("NFO".equals(exchange)) access.requirePermission(user.userId(), Capability.DERIVATIVES);
+        access.requireExchange(user.userId(), "NFO".equals(exchange) ? "NSE" : exchange);
         return response(provider.session(exchange, today()));
     }
 
     @GetMapping("/stream")
-    ResponseEntity<Stream> stream(@AuthenticationPrincipal AccountDirectory.Principal user, @RequestParam String key) {
+    ResponseEntity<Stream> stream(@AuthenticationPrincipal AccountDirectory.Principal user, @RequestParam String key,
+                                  HttpServletRequest request) {
         access.require(user.userId(), Capability.STREAM);
         checkDerivative(user, key);
-        return response(provider.stream(key(key)));
+        var batch = subscriptions.read(client(user, request, SINGLE_LEGACY_TAB), Set.of(key), validSession(request));
+        return response(new Stream(batch.status(), batch.quotes().get(key)));
     }
 
     @GetMapping("/streams")
-    ResponseEntity<Streams> streams(@AuthenticationPrincipal AccountDirectory.Principal user, @RequestParam List<String> keys) {
+    ResponseEntity<Streams> streams(@AuthenticationPrincipal AccountDirectory.Principal user, @RequestParam List<String> keys,
+                                    @RequestParam(required = false) UUID tab, HttpServletRequest request) {
         access.require(user.userId(), Capability.STREAM);
         if (keys.isEmpty() || keys.size() > STREAM_LIMIT) throw invalid();
         var unique = new LinkedHashSet<String>();
@@ -162,7 +178,24 @@ final class MarketDataApi {
             checkDerivative(user, key);
             unique.add(key(key));
         }
-        return response(provider.streams(unique));
+        return response(subscriptions.read(client(user, request, tab == null ? BATCH_LEGACY_TAB : tab), unique, validSession(request)));
+    }
+
+    private static java.util.function.BooleanSupplier validSession(HttpServletRequest request) {
+        var session = request.getSession(false);
+        return () -> {
+            try {
+                return session != null && session.getAttribute("SPRING_SECURITY_CONTEXT") instanceof
+                    org.springframework.security.core.context.SecurityContext context && context.getAuthentication() != null &&
+                    context.getAuthentication().isAuthenticated();
+            } catch (IllegalStateException invalidated) { return false; }
+        };
+    }
+
+    private static MarketStreamSubscriptions.Client client(AccountDirectory.Principal user, HttpServletRequest request, UUID tab) {
+        var session = request.getSession(false);
+        if (session == null) throw failure(HttpStatus.UNAUTHORIZED, "MARKET_SESSION_REQUIRED");
+        return new MarketStreamSubscriptions.Client(user.userId(), session.getId(), tab);
     }
 
     @GetMapping("/watchlists")
@@ -199,7 +232,10 @@ final class MarketDataApi {
         access.requirePermission(user.userId(), Capability.WATCHLIST);
         return response(db.query("""
             SELECT instrument_key FROM market_watchlist WHERE user_id=? AND source=? AND watchlist_name=? ORDER BY instrument_key
-            """, (rs, n) -> new Watch(rs.getString(1)), user.userId(), provider.source(), listName(name)));
+            """, (rs, n) -> new Watch(rs.getString(1)), user.userId(), provider.source(), listName(name)).stream()
+            .filter(row -> access.exchanges(user.userId()).contains(provider.exchange(row.instrumentKey())))
+            .filter(row -> !row.instrumentKey().startsWith("NSE_FO|") || access.capabilities(user.userId()).contains(Capability.DERIVATIVES))
+            .toList());
     }
 
     @PutMapping("/watchlist")
@@ -237,7 +273,9 @@ final class MarketDataApi {
     }
 
     private void checkDerivative(AccountDirectory.Principal user, String key) {
-        if (key(key).startsWith("NSE_FO|")) access.requirePermission(user.userId(), Capability.DERIVATIVES);
+        String valid = key(key);
+        access.requireExchange(user.userId(), provider.exchange(valid));
+        if (valid.startsWith("NSE_FO|")) access.requirePermission(user.userId(), Capability.DERIVATIVES);
     }
 
     @ExceptionHandler(MarketDataAccess.Rejected.class)

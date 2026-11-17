@@ -10,12 +10,14 @@ import java.util.concurrent.TimeUnit;
 abstract class OperationsWorker implements SmartLifecycle {
     private final String name;
     private final long delay;
+    private final WorkerCoordinator coordinator;
     private volatile ScheduledExecutorService executor;
 
-    OperationsWorker(String name, long delay, long minimumDelay) {
+    OperationsWorker(String name, long delay, long minimumDelay, WorkerCoordinator coordinator) {
         if (delay < minimumDelay) throw new IllegalArgumentException("Worker delay is too short: " + name);
         this.name = name;
         this.delay = delay;
+        this.coordinator = coordinator;
     }
 
     static int checkedBatch(int batch) {
@@ -25,10 +27,14 @@ abstract class OperationsWorker implements SmartLifecycle {
 
     abstract void runOnce();
 
+    final <T> java.util.Optional<T> coordinate(java.util.function.Supplier<T> task) {
+        return coordinator.run(name, task);
+    }
+
     @Override public synchronized void start() {
         if (isRunning()) return;
         executor = Executors.newSingleThreadScheduledExecutor(Thread.ofPlatform().name(name).factory());
-        executor.scheduleWithFixedDelay(this::runOnce, 0, delay, TimeUnit.MILLISECONDS);
+        executor.scheduleWithFixedDelay(() -> coordinator.scheduled(name, this::runOnce), 0, delay, TimeUnit.MILLISECONDS);
     }
 
     @Override public synchronized void stop() {

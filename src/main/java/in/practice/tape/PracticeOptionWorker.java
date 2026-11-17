@@ -17,8 +17,8 @@ final class PracticeOptionWorker extends OperationsWorker {
     private PracticeOptions.Work expiryCursor;
     private UUID markCursor;
 
-    PracticeOptionWorker(PracticeOptions options) {
-        super(options.isFutures() ? "tape-practice-futures" : "tape-practice-options", 2000, 1000);
+    PracticeOptionWorker(PracticeOptions options, WorkerCoordinator coordinator) {
+        super(options.isFutures() ? "tape-practice-futures" : "tape-practice-options", 2000, 1000, coordinator);
         this.options = options;
     }
 

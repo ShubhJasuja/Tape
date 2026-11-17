@@ -35,7 +35,9 @@ final class PracticeFutures extends PracticeOptions {
 
     @Bean
     @ConditionalOnProperty(name = "tape.practice-futures.enabled", havingValue = "true")
-    static OperationsWorker practiceFuturesWorker(PracticeFutures futures) { return new PracticeOptionWorker(futures); }
+    static OperationsWorker practiceFuturesWorker(PracticeFutures futures, WorkerCoordinator coordinator) {
+        return new PracticeOptionWorker(futures, coordinator);
+    }
 
     static boolean supports(Contract contract) {
         return SOURCE.equals(contract.source()) && "NSE".equals(contract.exchange()) &&

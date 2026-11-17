@@ -27,6 +27,10 @@ class TradingMetrics {
 
     void count(String name, String outcome) { registry.counter(name, "outcome", outcome).increment(); }
 
+    void workerRun(String worker, String outcome) {
+        registry.counter("tape.worker.runs", "worker", worker, "outcome", outcome).increment();
+    }
+
     Timer.Sample start() { return Timer.start(registry); }
 
     void stop(Timer.Sample sample, String name, String outcome) {
