@@ -14,6 +14,7 @@ const date = value => value ? timestamp.format(new Date(value)) + ' IST' : '—'
 const value = n => n == null ? '—' : format.format(n);
 const recent = (quote, now) => quote?.freshness === 'RECENT' && now - Date.parse(quote.exchangeAt) <= 30_000;
 const labels = { DISCONNECTED: 'Disconnected', CONFIGURED: 'Ready to connect', TOKEN_REQUIRED: 'Token required',
+  MARKET_FEED_BUSY: 'Feed active on another server',
   CONNECTING: 'Connecting', CONNECTED: 'Connected', MARKET_AUTH_FAILED: 'Credentials rejected',
   MARKET_PROVIDER_FORBIDDEN: 'Upstox access denied',
   MARKET_STREAM_AUTH_FAILED: 'Stream authorization rejected',

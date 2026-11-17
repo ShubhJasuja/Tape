@@ -323,10 +323,81 @@ class AccountSecurityTest {
             assertEquals(email, JSON.readTree(restored.body()).path("email").asText());
             assertEquals("DISCONNECTED", JSON.readTree(b.proxy("GET", API + "/market-data/status", signedIn, "", null).body())
                 .path("status").asText());
+            var sessions = first.getBean(org.springframework.session.jdbc.JdbcIndexedSessionRepository.class);
+            String sessionId = sessions.findByPrincipalName(email).keySet().iterator().next();
+            var fixture = org.mockito.Mockito.mock(MarketDataProvider.class);
+            org.mockito.Mockito.when(fixture.streams(org.mockito.ArgumentMatchers.anySet()))
+                .thenReturn(new MarketDataProvider.Streams("CONNECTED", Map.of()));
+            var meters = new io.micrometer.core.instrument.simple.SimpleMeterRegistry();
+            try (var stream = new MarketStreamSubscriptions(fixture, new TradingMetrics(meters), java.time.Clock.systemUTC(), runtimeDataSource())) {
+                var client = new MarketStreamSubscriptions.Client(UUID.randomUUID(), sessionId, UUID.randomUUID());
+                stream.read(client, java.util.Set.of("NSE_INDEX|Fixture"), () -> sessions.findById(sessionId) != null);
             csrf = JSON.readTree(b.proxy("GET", API + "/auth/csrf", signedIn, "", null).body());
             assertEquals(204, b.proxy("POST", API + "/auth/logout", signedIn, "", csrf).statusCode());
             assertEquals(401, a.proxy("GET", API + "/accounts", signedIn, "", null).statusCode());
+                stream.expire();
+                org.mockito.Mockito.verify(fixture, org.mockito.Mockito.atLeastOnce()).streams(java.util.Set.of());
+            } finally { meters.close(); }
         }
+    }
+
+    @Test
+    void distributedLoginGuessingHasTheSameSharedLimitForKnownAndUnknownEmails() throws Exception {
+        String known = email(), unknown = email();
+        try (var first = startApplication(false); var second = startApplication(false)) {
+            var a = new Browser(first);
+            var b = new Browser(second);
+            var bootstrap = a.proxy("GET", API + "/auth/csrf", null, "", null);
+            var cookie = sessionCookie(bootstrap);
+            var csrf = JSON.readTree(bootstrap.body());
+            assertEquals(201, a.proxy("POST", API + "/auth/register", cookie,
+                JSON.writeValueAsString(Map.of("email", known, "password", PASSWORD)), csrf).statusCode());
+            for (int attempt = 0; attempt < 8; attempt++) {
+                var node = attempt % 2 == 0 ? a : b;
+                for (String address : List.of(known, unknown)) {
+                    var result = node.proxy("POST", API + "/auth/login", cookie,
+                        "email=" + URLEncoder.encode(address.toUpperCase(java.util.Locale.ROOT), StandardCharsets.UTF_8) +
+                            "&password=incorrect-password", csrf);
+                    assertEquals(401, result.statusCode());
+                }
+            }
+            for (String address : List.of(known, unknown)) {
+                byte[] bucket = java.security.MessageDigest.getInstance("SHA-256")
+                    .digest(("login-email:" + address).getBytes(StandardCharsets.UTF_8));
+                assertEquals(8, owner.queryForObject("SELECT sum(used) FROM auth_request_budget WHERE bucket=?", Integer.class, bucket));
+                // Complete a possible new clock-minute bucket without querying whether the identity exists.
+                var budget = new AuthRequestBudget(new JdbcTemplate(runtimeDataSource()));
+                while (budget.allow("login-email:" + address, 8)) {}
+                var result = b.proxy("POST", API + "/auth/login", cookie,
+                    "email=" + URLEncoder.encode(address, StandardCharsets.UTF_8) + "&password=incorrect-password", csrf);
+                assertEquals(429, result.statusCode());
+                assertEquals("", result.body());
+            }
+        }
+    }
+
+    @Test
+    void streamOwnerLeaseAllowsOneInstanceAndInvalidSessionsReleaseItsKeys() {
+        var registry = new io.micrometer.core.instrument.simple.SimpleMeterRegistry();
+        var provider = org.mockito.Mockito.mock(MarketDataProvider.class);
+        org.mockito.Mockito.when(provider.streams(org.mockito.ArgumentMatchers.anySet()))
+            .thenReturn(new MarketDataProvider.Streams("CONNECTING", Map.of()));
+        var valid = new java.util.concurrent.atomic.AtomicBoolean(true);
+        UUID user = UUID.randomUUID();
+        var client = new MarketStreamSubscriptions.Client(user, "expired-session", UUID.randomUUID());
+        try (var first = new MarketStreamSubscriptions(provider, new TradingMetrics(registry), java.time.Clock.systemUTC(), runtimeDataSource());
+             var second = new MarketStreamSubscriptions(provider, new TradingMetrics(registry), java.time.Clock.systemUTC(), runtimeDataSource())) {
+            assertEquals("CONNECTING", first.read(client, java.util.Set.of("NSE_INDEX|Fixture"), valid::get).status());
+            assertEquals("MARKET_FEED_BUSY", second.read(client, java.util.Set.of("NSE_INDEX|Fixture"), valid::get).status());
+            valid.set(false);
+            first.expire();
+            org.mockito.Mockito.verify(provider, org.mockito.Mockito.atLeastOnce()).streams(java.util.Set.of());
+            assertThrows(MarketDataAccess.Rejected.class, () -> first.read(client, java.util.Set.of("NSE_INDEX|Fixture"), valid::get));
+            valid.set(true);
+            assertEquals("CONNECTING", second.read(client, java.util.Set.of("NSE_INDEX|Fixture"), valid::get).status());
+            second.removeSession(client.session());
+            assertEquals("CONNECTING", first.read(client, java.util.Set.of("NSE_INDEX|Fixture"), valid::get).status());
+        } finally { registry.close(); }
     }
 
     @Test

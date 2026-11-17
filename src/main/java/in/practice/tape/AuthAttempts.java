@@ -70,7 +70,8 @@ final class AuthAttempts extends OncePerRequestFilter {
             return false;
         }
         String email = AccountDirectory.normalizedEmail(request.getParameter("email"));
-        if (email != null && !allow("login-email:" + email, 8, now)) {
+        if (email != null && (!local("login-email:" + email, 8, now) ||
+            (shared != null && !allow("login-email:" + email, 8, now)))) {
             return throttled(response);
         }
         if (email == null || !AccountDirectory.validPassword(request.getParameter("password"))) {

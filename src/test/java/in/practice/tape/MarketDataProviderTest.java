@@ -353,7 +353,7 @@ class MarketDataProviderTest {
             var outage = subscriptions.read(bob, Set.of(index));
             assertEquals("DISCONNECTED", outage.status());
             assertTrue(outage.quotes().isEmpty());
-            verify(provider).streams(Set.of(index));
+            verify(provider, times(2)).streams(Set.of(index));
         } finally { registry.close(); }
     }
 

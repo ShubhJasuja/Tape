@@ -164,7 +164,7 @@ final class MarketDataApi {
                                   HttpServletRequest request) {
         access.require(user.userId(), Capability.STREAM);
         checkDerivative(user, key);
-        var batch = subscriptions.read(client(user, request, SINGLE_LEGACY_TAB), Set.of(key));
+        var batch = subscriptions.read(client(user, request, SINGLE_LEGACY_TAB), Set.of(key), validSession(request));
         return response(new Stream(batch.status(), batch.quotes().get(key)));
     }
 
@@ -178,7 +178,18 @@ final class MarketDataApi {
             checkDerivative(user, key);
             unique.add(key(key));
         }
-        return response(subscriptions.read(client(user, request, tab == null ? BATCH_LEGACY_TAB : tab), unique));
+        return response(subscriptions.read(client(user, request, tab == null ? BATCH_LEGACY_TAB : tab), unique, validSession(request)));
+    }
+
+    private static java.util.function.BooleanSupplier validSession(HttpServletRequest request) {
+        var session = request.getSession(false);
+        return () -> {
+            try {
+                return session != null && session.getAttribute("SPRING_SECURITY_CONTEXT") instanceof
+                    org.springframework.security.core.context.SecurityContext context && context.getAuthentication() != null &&
+                    context.getAuthentication().isAuthenticated();
+            } catch (IllegalStateException invalidated) { return false; }
+        };
     }
 
     private static MarketStreamSubscriptions.Client client(AccountDirectory.Principal user, HttpServletRequest request, UUID tab) {
