@@ -251,6 +251,8 @@ function IdentityForm({ flow, write, onBack }) {
     setError('');
     try {
       if (confirm && data.get('password') !== data.get('confirmation')) throw new Error('The passwords must match.');
+      if (confirm && ([...data.get('password')].length < 12 || new TextEncoder().encode(data.get('password')).length > 72))
+        throw new Error('Use at least 12 characters and at most 72 UTF-8 bytes.');
       const payload = confirm ? { token: flow.token, password: data.get('password') } : { email: data.get('email') };
       const response = await write('/auth/' + flow.kind, JSON.stringify(payload), 'application/json');
       if (response.status === 429) throw new Error('Too many attempts. Wait a minute and try again.');

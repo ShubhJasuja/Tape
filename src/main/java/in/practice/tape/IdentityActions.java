@@ -76,7 +76,7 @@ final class IdentityActions {
         if (email == null || !AccountDirectory.validPassword(registration.password())) throw invalid();
         // Hashing occurs for both existing and new identities.
         String hash = passwords.encode(registration.password());
-        if (!budget.allow("verify-mail:" + email, 1)) return;
+        if (!budget.allow("VERIFY-mail:" + email, 1)) return;
         tx.executeWithoutResult(ignored -> {
             directory.lockIdentity(email);
             var identity = find(email);
@@ -175,6 +175,9 @@ final class IdentityActions {
                     UPDATE identity_mail SET attempts=attempts+1,next_attempt_at=clock_timestamp()+ interval '5 minutes' WHERE action_id=?
                     """, mail.action());
                 metrics.count("tape.identity.mail", "retry");
+            } catch (IllegalStateException unreadable) {
+                db.update("UPDATE identity_mail SET attempts=8 WHERE action_id=?", mail.action());
+                metrics.count("tape.identity.mail", "unreadable");
             }
         });
     }

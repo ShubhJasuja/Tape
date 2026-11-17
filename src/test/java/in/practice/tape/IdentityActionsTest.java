@@ -163,4 +163,17 @@ class IdentityActionsTest {
         String token = deliveredToken();
         assertEquals(43, token.length());
     }
+
+    @Test void unreadableQueueItemDoesNotBlockOtherAccountsOrExposeItsToken() {
+        actions.register(new AccountDirectory.Registration(email, original));
+        AccountSecurityTest.owner.update("UPDATE identity_mail SET encrypted_token=decode(repeat('00',64),'hex')");
+        actions.deliverOne();
+        verifyNoInteractions(mail);
+        assertEquals(1, db.queryForObject("SELECT count(*) FROM identity_mail WHERE attempts=8", Integer.class));
+        String other = UUID.randomUUID() + "@example.test";
+        actions.register(new AccountDirectory.Registration(other, original));
+        actions.deliverOne();
+        verify(mail).send(any(SimpleMailMessage.class));
+        AccountSecurityTest.owner.update("DELETE FROM identity_actions WHERE user_id=(SELECT user_id FROM local_credentials WHERE email=?)", email);
+    }
 }
