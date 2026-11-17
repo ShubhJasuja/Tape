@@ -50,6 +50,7 @@ class IdentityActionsTest {
         var tx = new TransactionTemplate(new JdbcTransactionManager(db.getDataSource()));
         passwords = app.getBean(PasswordEncoder.class);
         environment = new MockEnvironment().withProperty("tape.identity.mail.enabled", "true")
+            .withProperty("TAPE_REGISTRATION_MODE", "PUBLIC")
             .withProperty("TAPE_PUBLIC_ORIGIN", "https://tape.example.test").withProperty("TAPE_MAIL_FROM", "accounts@example.test")
             .withProperty("TAPE_SMTP_HOST", "fixture.example.test")
             .withProperty("TAPE_IDENTITY_MAIL_KEY", Base64.getEncoder().encodeToString(new byte[32]));
@@ -175,5 +176,42 @@ class IdentityActionsTest {
         actions.deliverOne();
         verify(mail).send(any(SimpleMailMessage.class));
         AccountSecurityTest.owner.update("DELETE FROM identity_actions WHERE user_id=(SELECT user_id FROM local_credentials WHERE email=?)", email);
+    }
+
+    @Test void closedRegistrationDoesNotProvisionOrQueueAndExistingUsersCanStillRecover() {
+        actions.register(new AccountDirectory.Registration(email, original));
+        actions.confirm(new IdentityActions.Confirmation(deliveredToken(), original), "VERIFY");
+        environment.setProperty("TAPE_REGISTRATION_MODE", "CLOSED");
+        actions = independentActions();
+        String stranger = UUID.randomUUID() + "@example.test";
+        actions.register(new AccountDirectory.Registration(stranger, original));
+        assertEquals(0, db.queryForObject("SELECT count(*) FROM local_credentials WHERE email=?", Integer.class, stranger));
+        actions.request(new IdentityActions.Email(email), "RESET");
+        assertEquals(43, deliveredToken().length());
+    }
+
+    @Test void invitationsAreNormalizedAndEachInvitedUserHasIndependentFunds() {
+        String other = UUID.randomUUID() + "@example.test";
+        environment.setProperty("TAPE_REGISTRATION_MODE", "ALLOWLIST");
+        environment.setProperty("TAPE_REGISTRATION_ALLOWLIST", email.toUpperCase(java.util.Locale.ROOT) + ", " + other);
+        actions = independentActions();
+        actions.register(new AccountDirectory.Registration(email, original));
+        actions.register(new AccountDirectory.Registration(other, original));
+        var first = directory.load(email).userId();
+        String uninvited = UUID.randomUUID() + "@example.test";
+        actions.register(new AccountDirectory.Registration(uninvited, original));
+        assertEquals(0, db.queryForObject("SELECT count(*) FROM local_credentials WHERE email=?", Integer.class, uninvited));
+        var second = directory.load(other).userId();
+        assertNotEquals(first, second);
+        assertEquals(200_000_000L, db.queryForObject("SELECT sum(balance_paise) FROM wallets w JOIN trading_accounts a ON a.id=w.account_id WHERE a.user_id=?", Long.class, first));
+        assertEquals(200_000_000L, db.queryForObject("SELECT sum(balance_paise) FROM wallets w JOIN trading_accounts a ON a.id=w.account_id WHERE a.user_id=?", Long.class, second));
+        actions.deliverOne();
+        actions.deliverOne();
+    }
+
+    @Test void invitationPolicyDefaultsClosedAndInvalidConfigurationFailsClosed() {
+        assertFalse(new RegistrationAccess(new MockEnvironment()).permits(email));
+        assertThrows(IllegalArgumentException.class, () -> new RegistrationAccess(new MockEnvironment().withProperty("TAPE_REGISTRATION_MODE", "ALLOWLIST")));
+        assertThrows(IllegalArgumentException.class, () -> new RegistrationAccess(new MockEnvironment().withProperty("TAPE_REGISTRATION_MODE", "OPEN")));
     }
 }

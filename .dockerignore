@@ -1,0 +1,17 @@
+.git
+.env*
+**/.env*
+**/*.p12
+**/*.key
+**/*.pem
+**/node_modules
+**/dist
+target
+data
+*.log
+*.dump
+**/*.dump
+backups
+.taste-skill
+.codex
+.agents

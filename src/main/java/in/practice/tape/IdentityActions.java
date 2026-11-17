@@ -38,6 +38,7 @@ final class IdentityActions {
     private final AuthRequestBudget budget;
     private final JavaMailSender sender;
     private final TradingMetrics metrics;
+    private final RegistrationAccess registrationAccess;
     private final boolean enabled;
     private final String origin;
     private final String from;
@@ -52,6 +53,7 @@ final class IdentityActions {
         this.passwords = passwords;
         this.budget = budget;
         this.metrics = metrics;
+        registrationAccess = new RegistrationAccess(env);
         enabled = env.getProperty("tape.identity.mail.enabled", Boolean.class, false);
         this.sender = enabled ? sender.getIfAvailable() : null;
         origin = env.getProperty("TAPE_PUBLIC_ORIGIN", "").replaceAll("/+$", "");
@@ -77,6 +79,7 @@ final class IdentityActions {
         // Hashing occurs for both existing and new identities.
         String hash = passwords.encode(registration.password());
         if (!budget.allow("VERIFY-mail:" + email, 1)) return;
+        if (!registrationAccess.permits(email)) return;
         tx.executeWithoutResult(ignored -> {
             directory.lockIdentity(email);
             var identity = find(email);
@@ -190,6 +193,7 @@ final class IdentityActions {
     }
 
     private String decrypt(UUID action, byte[] encrypted) {
+        if (encrypted == null || encrypted.length != 71) throw new IllegalStateException("Invalid encrypted identity mail");
         return new String(crypt(Cipher.DECRYPT_MODE, action, java.util.Arrays.copyOf(encrypted, 12),
             java.util.Arrays.copyOfRange(encrypted, 12, encrypted.length)), StandardCharsets.UTF_8);
     }
