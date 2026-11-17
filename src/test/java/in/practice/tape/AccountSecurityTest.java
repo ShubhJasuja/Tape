@@ -297,11 +297,19 @@ class AccountSecurityTest {
             assertTrue(cookie.contains("HttpOnly"));
             assertTrue(cookie.contains("SameSite=Lax"));
         }
+        try (var untrusted = startApplication(false, false, false,
+            Map.of("server.tomcat.remoteip.internal-proxies", "192\\.0\\.2\\.1"))) {
+            var client = new Browser(untrusted);
+            var response = client.proxy("GET", API + "/auth/csrf", null, "", null);
+            assertEquals(403, response.statusCode());
+            assertTrue(response.headers().allValues("Set-Cookie").isEmpty());
+        }
     }
 
     @Test
     void httpsSessionAndLogoutAreSharedByIndependentNodes() throws Exception {
         String email = email();
+        verifiedIdentity(email);
         try (var first = startApplication(false); var second = startApplication(false)) {
             var a = new Browser(first);
             var b = new Browser(second);
@@ -309,8 +317,6 @@ class AccountSecurityTest {
             assertEquals(200, bootstrap.statusCode());
             String before = sessionCookie(bootstrap);
             var csrf = JSON.readTree(bootstrap.body());
-            var registration = JSON.writeValueAsString(Map.of("email", email, "password", PASSWORD));
-            assertEquals(201, a.proxy("POST", API + "/auth/register", before, registration, csrf).statusCode());
             String form = "email=" + URLEncoder.encode(email, StandardCharsets.UTF_8) +
                 "&password=" + URLEncoder.encode(PASSWORD, StandardCharsets.UTF_8);
             var login = a.proxy("POST", API + "/auth/login", before, form, csrf);
@@ -344,14 +350,13 @@ class AccountSecurityTest {
     @Test
     void distributedLoginGuessingHasTheSameSharedLimitForKnownAndUnknownEmails() throws Exception {
         String known = email(), unknown = email();
+        verifiedIdentity(known);
         try (var first = startApplication(false); var second = startApplication(false)) {
             var a = new Browser(first);
             var b = new Browser(second);
             var bootstrap = a.proxy("GET", API + "/auth/csrf", null, "", null);
             var cookie = sessionCookie(bootstrap);
             var csrf = JSON.readTree(bootstrap.body());
-            assertEquals(201, a.proxy("POST", API + "/auth/register", cookie,
-                JSON.writeValueAsString(Map.of("email", known, "password", PASSWORD)), csrf).statusCode());
             for (int attempt = 0; attempt < 8; attempt++) {
                 var node = attempt % 2 == 0 ? a : b;
                 for (String address : List.of(known, unknown)) {
@@ -401,6 +406,68 @@ class AccountSecurityTest {
     }
 
     @Test
+    void publicVerificationAndResetUseGenericResponsesAndInvalidateOtherNodes() throws Exception {
+        var sender = org.mockito.Mockito.mock(org.springframework.mail.javamail.JavaMailSender.class);
+        var settings = new java.util.HashMap<String, Object>();
+        settings.put("tape.identity.mail.enabled", true);
+        settings.put("tape.identity.mail.scheduled", false);
+        settings.put("TAPE_SMTP_HOST", "fixture.example.test");
+        settings.put("TAPE_PUBLIC_ORIGIN", "https://tape.example.test");
+        settings.put("TAPE_MAIL_FROM", "accounts@example.test");
+        settings.put("TAPE_IDENTITY_MAIL_KEY", java.util.Base64.getEncoder().encodeToString(new byte[32]));
+        settings.put("TEST_MAIL_SENDER", sender);
+        try (var first = startApplication(false, false, false, settings);
+             var second = startApplication(false, false, false, settings)) {
+            var a = new Browser(first);
+            var b = new Browser(second);
+            String email = email();
+            var csrfResponse = a.proxy("GET", API + "/auth/csrf", null, "", null);
+            String anonymous = sessionCookie(csrfResponse);
+            var csrf = JSON.readTree(csrfResponse.body());
+            String registration = JSON.writeValueAsString(Map.of("email", email, "password", PASSWORD));
+            assertEquals(202, a.proxy("POST", API + "/auth/register", anonymous, registration, csrf).statusCode());
+            assertEquals(202, b.proxy("POST", API + "/auth/register", anonymous, registration, csrf).statusCode());
+            String login = "email=" + URLEncoder.encode(email, StandardCharsets.UTF_8) + "&password=" +
+                URLEncoder.encode(PASSWORD, StandardCharsets.UTF_8);
+            assertEquals(401, b.proxy("POST", API + "/auth/login", anonymous, login, csrf).statusCode());
+            first.getBean(IdentityActions.class).deliverOne();
+            var messages = org.mockito.ArgumentCaptor.forClass(org.springframework.mail.SimpleMailMessage.class);
+            org.mockito.Mockito.verify(sender).send(messages.capture());
+            String token = emailToken(messages.getValue().getText());
+            String confirm = JSON.writeValueAsString(Map.of("token", token, "password", PASSWORD));
+            assertEquals(403, b.proxy("POST", API + "/auth/verify", anonymous, confirm, null).statusCode());
+            assertEquals(204, b.proxy("POST", API + "/auth/verify", anonymous, confirm, csrf).statusCode());
+            var signedIn = a.proxy("POST", API + "/auth/login", anonymous, login, csrf);
+            assertEquals(204, signedIn.statusCode());
+            String session = sessionCookie(signedIn);
+            assertEquals(200, b.proxy("GET", API + "/accounts", session, "", null).statusCode());
+            csrfResponse = b.proxy("GET", API + "/auth/csrf", null, "", null);
+            anonymous = sessionCookie(csrfResponse);
+            csrf = JSON.readTree(csrfResponse.body());
+            var recovery = JSON.writeValueAsString(Map.of("email", email));
+            assertEquals(202, a.proxy("POST", API + "/auth/recovery", anonymous, recovery, csrf).statusCode());
+            assertEquals(202, a.proxy("POST", API + "/auth/recovery", anonymous,
+                JSON.writeValueAsString(Map.of("email", email())), csrf).statusCode());
+            first.getBean(IdentityActions.class).deliverOne();
+            org.mockito.Mockito.verify(sender, org.mockito.Mockito.times(2)).send(messages.capture());
+            String reset = emailToken(messages.getAllValues().getLast().getText());
+            String newPassword = UUID.randomUUID().toString();
+            assertEquals(204, b.proxy("POST", API + "/auth/reset", anonymous,
+                JSON.writeValueAsString(Map.of("token", reset, "password", newPassword)), csrf).statusCode());
+            assertEquals(401, a.proxy("GET", API + "/accounts", session, "", null).statusCode());
+            assertEquals(401, b.proxy("GET", API + "/accounts", session, "", null).statusCode());
+            assertEquals(400, a.proxy("POST", API + "/auth/reset", anonymous,
+                JSON.writeValueAsString(Map.of("token", reset, "password", newPassword)), csrf).statusCode());
+        }
+    }
+
+    private static String emailToken(String text) {
+        var match = java.util.regex.Pattern.compile("#(?:verify|reset)=([A-Za-z0-9_-]{43})").matcher(text);
+        assertTrue(match.find());
+        return match.group(1);
+    }
+
+    @Test
     void readinessDetectsMissingRuntimeSessionGrants() {
         var storage = local.getBean("accountStorage", org.springframework.boot.actuate.health.HealthIndicator.class);
         assertEquals(org.springframework.boot.actuate.health.Status.UP, storage.health().getStatus());
@@ -434,6 +501,11 @@ class AccountSecurityTest {
     private static String sessionCookie(HttpResponse<String> response) {
         return response.headers().allValues("Set-Cookie").stream().filter(value -> value.startsWith("JSESSIONID="))
             .map(value -> value.split(";", 2)[0]).findFirst().orElseThrow();
+    }
+
+    private static void verifiedIdentity(String email) {
+        local.getBean(AccountDirectory.class).register(new AccountDirectory.Registration(email, PASSWORD));
+        owner.update("UPDATE local_credentials SET verified_at=clock_timestamp() WHERE email=?", email);
     }
 
     @Test
@@ -562,9 +634,12 @@ class AccountSecurityTest {
         }
         settings.put("TAPE_RECONCILIATION_SCHEDULED", false);
         settings.putAll(overrides);
+        Object mail = settings.remove("TEST_MAIL_SENDER");
         return new SpringApplicationBuilder(Tape.class).profiles(profiles)
-            .initializers(context -> context.getEnvironment().getPropertySources()
-                .addFirst(new MapPropertySource("accounts-test", settings)))
+            .initializers(context -> {
+                context.getEnvironment().getPropertySources().addFirst(new MapPropertySource("accounts-test", settings));
+                if (mail != null) context.getBeanFactory().registerSingleton("fixtureMail", mail);
+            })
             .run();
     }
 
@@ -634,7 +709,8 @@ class AccountSecurityTest {
                 .header("X-Forwarded-For", "198.51.100.33").method(method, HttpRequest.BodyPublishers.ofString(body));
             if (cookie != null) request.header("Cookie", cookie);
             if (path.endsWith("/login")) request.header("Content-Type", "application/x-www-form-urlencoded");
-            if (path.endsWith("/register")) request.header("Content-Type", "application/json");
+            if (!path.endsWith("/login") && method.equals("POST") && !body.isEmpty())
+                request.header("Content-Type", "application/json");
             if (csrf != null) request.header(csrf.path("headerName").asText(), csrf.path("token").asText());
             return send(request.build());
         }

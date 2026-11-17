@@ -29,6 +29,11 @@ export default function TapeEntry({ Terminal, Chart }) {
 
   async function restore() {
     setError('');
+    if (/^#(?:verify|reset)=/.test(location.hash)) {
+      setUser(null);
+      setPhase('accounts');
+      return;
+    }
     try {
       const response = await request('/auth/me');
       if (response.status === 404) {
@@ -64,6 +69,17 @@ function AccountWorkspace({ user, restore, signOut, Terminal, Chart }) {
   const [error, setError] = useState('');
   const [accounts, setAccounts] = useState(null);
   const [selection, setSelection] = useState('');
+  const [identity, setIdentity] = useState(() => {
+    const values = new URLSearchParams(location.hash.slice(1));
+    for (const kind of ['verify', 'reset']) {
+      const token = values.get(kind);
+      if (token) {
+        history.replaceState(null, '', location.pathname + location.search);
+        return { kind, token };
+      }
+    }
+    return null;
+  });
 
   useEffect(() => {
     if (!user) {
@@ -102,7 +118,11 @@ function AccountWorkspace({ user, restore, signOut, Terminal, Chart }) {
         ? await write('/auth/register', JSON.stringify({ email, password }), 'application/json')
         : await write('/auth/login', new URLSearchParams({ email, password }), 'application/x-www-form-urlencoded');
       if (response.status === 429) throw new Error('Too many attempts. Wait a minute and try again.');
-      if (registering && response.status === 201) {
+      if (registering && response.status === 503) throw new Error('Email verification is temporarily unavailable. Please try again later.');
+      if (registering && response.status === 202) {
+        setRegistering(false);
+        setMessage('If registration is available for this email, a verification link will arrive shortly.');
+      } else if (registering && response.status === 201) {
         setRegistering(false);
         setMessage('Account created. Sign in to view your virtual balances.');
       } else if (!registering && response.status === 204) {
@@ -137,6 +157,17 @@ function AccountWorkspace({ user, restore, signOut, Terminal, Chart }) {
     } finally { setBusy(false); }
   }
 
+  async function revokeSessions() {
+    setBusy(true);
+    try {
+      const response = await write('/auth/sessions/revoke');
+      if (!response.ok) throw new Error('Could not end your sessions. Try again.');
+      signOut();
+      setMessage('Signed out on all devices.');
+    } catch (failure) { setError(failure.message); }
+    finally { setBusy(false); }
+  }
+
   const active = accounts?.find(account => account.id === selection);
   const demo = accounts?.find(account => account.mode === 'DEMO');
   const showMarket = !!user && workspace === 'market';
@@ -163,6 +194,7 @@ function AccountWorkspace({ user, restore, signOut, Terminal, Chart }) {
         {message && <p className="notice" role="status">{message}</p>}
         {user ? <>
           <p>Account balances are virtual. Live-data trading is unavailable.</p>
+          <button className="quiet" disabled={busy} onClick={revokeSessions}>Sign out on all devices</button>
           {!accounts && !error && <p role="status">Loading your accounts…</p>}
           {accounts?.length === 0 && <p>No accounts are available.</p>}
           {active && <>
@@ -179,7 +211,7 @@ function AccountWorkspace({ user, restore, signOut, Terminal, Chart }) {
             </dl>}
             <p className="account-note">{active.mode === 'LIVE_DATA' ? 'Live-data trading requires market-data permissions.' : active.tradingEnabled ? 'Demo trades use synthetic quotes and virtual cash.' : 'Demo trading is disabled on this server.'}</p>
           </>}
-        </> : <>
+        </> : identity ? <IdentityForm flow={identity} write={write} onBack={() => { setIdentity(null); setRegistering(false); }} /> : <>
           <form className="account-form" onSubmit={submit}>
             <label>Email<input type="email" required maxLength={254} autoComplete="username"
               value={email} onChange={event => setEmail(event.target.value)} /></label>
@@ -191,6 +223,10 @@ function AccountWorkspace({ user, restore, signOut, Terminal, Chart }) {
           <button className="quiet" type="button" disabled={busy} onClick={() => {
             setRegistering(!registering); setError(''); setMessage('');
           }}>{registering ? 'Back to sign in' : 'Create an account'}</button>
+          {!registering && <div className="identity-actions">
+            <button className="quiet" onClick={() => setIdentity({ kind: 'recovery' })}>Forgot password?</button>
+            <button className="quiet" onClick={() => setIdentity({ kind: 'verification' })}>Resend verification</button>
+          </div>}
         </>}
       </section>
     </main>
@@ -200,4 +236,43 @@ function AccountWorkspace({ user, restore, signOut, Terminal, Chart }) {
         <main id="workspace"><p role={error ? 'alert' : 'status'}>{error || (accounts ? 'No demo account is available.' : 'Loading your demo account…')}</p></main>) :
       active?.tradingEnabled && <Terminal key={active.id} demoAccount={active.id} sessionExpired={signOut} />}
   </>;
+}
+
+function IdentityForm({ flow, write, onBack }) {
+  const confirm = ['verify', 'reset'].includes(flow.kind);
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState('');
+  const [error, setError] = useState('');
+  async function submit(event) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const data = new FormData(form);
+    setBusy(true);
+    setError('');
+    try {
+      if (confirm && data.get('password') !== data.get('confirmation')) throw new Error('The passwords must match.');
+      const payload = confirm ? { token: flow.token, password: data.get('password') } : { email: data.get('email') };
+      const response = await write('/auth/' + flow.kind, JSON.stringify(payload), 'application/json');
+      if (response.status === 429) throw new Error('Too many attempts. Wait a minute and try again.');
+      if (response.status === 503) throw new Error('Email verification and recovery are temporarily unavailable.');
+      if (!response.ok) throw new Error(confirm ? 'This link is invalid or expired. Request a new email.' : 'Please try again.');
+      setMessage(confirm ? 'Password saved. You can sign in now.' : 'If the email is eligible, a link will arrive shortly.');
+      form.reset();
+    } catch (failure) { setError(failure.message); }
+    finally { setBusy(false); }
+  }
+  return <section aria-label="Account recovery">
+    <h2>{flow.kind === 'verify' ? 'Verify your email' : flow.kind === 'reset' ? 'Choose a new password' :
+      flow.kind === 'verification' ? 'Request a verification email' : 'Recover your account'}</h2>
+    {message ? <p role="status">{message}</p> : <form className="account-form" onSubmit={submit}>
+      {confirm ? <>
+        <label>New password<input name="password" type="password" required minLength={12} maxLength={72} autoComplete="new-password"/></label>
+        <label>Confirm password<input name="confirmation" type="password" required minLength={12} maxLength={72} autoComplete="new-password"/></label>
+        <p className="account-note">Use at least 12 characters.</p>
+      </> : <label>Email<input type="email" name="email" required maxLength={254} autoComplete="email"/></label>}
+      <button className="primary" disabled={busy}>{confirm ? 'Save password' : 'Send email'}</button>
+    </form>}
+    {error && <p className="notice" role="alert">{error}</p>}
+    <button type="button" className="quiet" disabled={busy} onClick={onBack}>Back to sign in</button>
+  </section>;
 }
