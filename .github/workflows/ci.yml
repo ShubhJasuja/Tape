@@ -11,7 +11,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 20
     env:
       UPSTOX_ANALYTICS_TOKEN: ''
       OLLAMA_MODEL: ''
@@ -30,6 +30,8 @@ jobs:
         run: |
           npm ci
           npm run build
+      - name: Verify private beta configuration guards
+        run: node --test scripts/check-beta-config.test.mjs
       - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
         with:
           distribution: temurin
@@ -37,3 +39,10 @@ jobs:
           cache: maven
       - name: Verify Java 21 backend and PostgreSQL 17 integrations
         run: ./mvnw --batch-mode clean verify -Dtape.postgres.tests=true -Dtape.browser.tests=true
+      - name: Build local deployment and encrypted backup images
+        run: |
+          docker build -f deploy/Dockerfile -t tape-beta:local .
+          docker build -f deploy/backup.Dockerfile -t tape-backup:local .
+      - name: Verify HTTPS deployment and encrypted restore
+        shell: pwsh
+        run: ./scripts/Test-BetaDeployment.ps1 -EncryptedRecovery

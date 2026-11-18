@@ -13,7 +13,10 @@ export async function chrome() {
   const profile = mkdtempSync(join(tmpdir(), 'tape-browser-'));
   const child = spawn(executable, ['--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check',
     '--ignore-certificate-errors', '--remote-debugging-address=127.0.0.1', '--remote-debugging-port=0',
-    ...(process.env.CI === 'true' ? ['--no-sandbox'] : []), `--user-data-dir=${profile}`, 'about:blank'], { stdio: 'ignore' });
+    ...(process.env.CI === 'true' ? ['--no-sandbox'] : []), `--user-data-dir=${profile}`, 'about:blank'], { stdio: ['ignore','ignore','pipe'] });
+  let startupLog = '', spawnFailure;
+  child.stderr.on('data', part => { startupLog = (startupLog + part).slice(-2000); });
+  child.on('error', failure => { spawnFailure = failure.message; });
   let socket, browserSocket, serial = 0;
   const pending = new Map();
   const errors = [];
@@ -26,7 +29,11 @@ export async function chrome() {
   try {
     let discovery;
     for (let i=0; i<100; i++) {
-      try { discovery = readFileSync(join(profile, 'DevToolsActivePort'), 'utf8').trim().split('\n'); break; } catch {}
+      try {
+        const lines = readFileSync(join(profile, 'DevToolsActivePort'), 'utf8').trim().split('\n');
+        if (/^[1-9]\d*$/.test(lines[0]) && lines[1]?.startsWith('/devtools/browser/')) { discovery = lines; break; }
+      } catch {}
+      if (spawnFailure) throw new Error(`Test Chrome could not start: ${spawnFailure}`);
       if (child.exitCode !== null) throw new Error('Test Chrome exited');
       await sleep(100);
     }
@@ -69,6 +76,6 @@ export async function chrome() {
     };
   } catch (failure) {
     socket?.close(); browserSocket?.close(); child.kill();
-    throw failure;
+    throw new Error(`${failure.message}\nChrome startup diagnostics: ${startupLog}`);
   }
 }
