@@ -134,7 +134,7 @@ class PrivateBetaJourneyTest {
             process.redirectErrorStream(true).redirectOutput(artifacts.resolve("journey.log").toFile());
             var journey = process.start();
             assertTrue(journey.waitFor(240, TimeUnit.SECONDS), "Browser journey timed out");
-            assertEquals(0, journey.exitValue(), "See target/beta-browser/journey.log (no credentials or tokens logged)");
+            assertEquals(0, journey.exitValue(), () -> browserFailure(artifacts.resolve("journey.log")));
             DatabaseMaintenance.reconcile(AccountSecurityTest.owner.getDataSource());
             assertTrue(requests.get() > 100);
         } finally {
@@ -181,5 +181,15 @@ class PrivateBetaJourneyTest {
         } catch (Exception failure) { /* Sender sees a failed SMTP connection and retains encrypted retry work. */ }
     }
     private static boolean isWindows() { return System.getProperty("os.name").startsWith("Windows"); }
+    private static String browserFailure(Path file) {
+        try {
+            if (Files.size(file) > 1_000_000) return "Browser failed; diagnostic log exceeds safe output size";
+            String log = Files.readString(file)
+                .replaceAll("[A-Za-z0-9_-]{43}", "[redacted-token]")
+                .replaceAll("(?i)[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", "[redacted-fixture-id]")
+                .replaceAll("(?i)[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}", "[redacted-fixture-email]");
+            return "Browser journey failed (redacted diagnostics):\n" + log.substring(Math.max(0,log.length()-4000));
+        } catch (IOException unavailable) { return "Browser failed; diagnostics unavailable"; }
+    }
     private static void restoreProperty(String name, String value) { if (value == null) System.clearProperty(name); else System.setProperty(name,value); }
 }
