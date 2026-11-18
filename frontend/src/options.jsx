@@ -79,6 +79,8 @@ export default function OptionsWorkspace({ account, read, write, signOut, desk =
   const position = view?.positions.find(item => item.contractId === selected?.id);
   const price = type === 'Limit' ? toPaise(limit) : selected?.markPaise;
   const count = Number(lots);
+  const validReduction = !futures || !reduceOnly ||
+    ((position?.lots || 0) * (side === 'BUY' ? 1 : -1) < 0 && count <= Math.abs(position.lots));
   const valid = selected && Number.isSafeInteger(count) && count >= 1 && count <= selected.maxLots &&
     Number.isSafeInteger(price) && price > 0 && price % selected.tickPaise === 0;
   const value = valid ? price * count * selected.lotSize * selected.multiplier : null;
@@ -128,7 +130,7 @@ export default function OptionsWorkspace({ account, read, write, signOut, desk =
   function submit(event) {
     event.preventDefault();
     if (pending) return mutate(pending);
-    if (valid && !readError && view.submissionsOpen !== false) return mutate({ requestId: crypto.randomUUID(), contractId: selected.id,
+    if (valid && validReduction && !readError && view.submissionsOpen !== false) return mutate({ requestId: crypto.randomUUID(), contractId: selected.id,
       specVersion: selected.specVersion, side, lots: count, limitPaise: type === 'Limit' ? price : null, reduceOnly });
   }
 
@@ -189,10 +191,11 @@ export default function OptionsWorkspace({ account, read, write, signOut, desk =
             <p className="options-caption">{selected.lotSize} units per lot · {money(selected.tickPaise)} tick{futures && ` · ×${selected.multiplier} multiplier`}</p>
             <dl className="est"><div><dt>{futures ? 'Estimated contract value' : 'Estimated premium'}</dt><dd>{money(safeValue)}</dd></div>
               <div><dt>Trading fee</dt><dd>{money(view.orderFeePaise)}</dd></div>
-              <div><dt>{futures ? 'Illustrative initial margin change' : 'Illustrative margin change'}</dt><dd>{money(margin, signed)}</dd></div>
-              {futures && <div><dt>Resulting maintenance margin</dt><dd>{money(maintenance)}</dd></div>}</dl>
+              <div><dt>{futures ? 'Illustrative initial margin change' : 'Illustrative margin change'}</dt><dd>{money(validReduction ? margin : null, signed)}</dd></div>
+              {futures && <div><dt>Resulting maintenance margin</dt><dd>{money(validReduction ? maintenance : null)}</dd></div>}</dl>
+            {!validReduction && <p className="options-caption" role="status">Choose an opposing side and at most the open position's lots, or turn off Reduce position only.</p>}
             {type === 'Limit' && limit && !valid && <p className="options-caption" role="status">Enter a positive, tick-aligned {futures ? 'price' : 'premium'} and a valid lot count.</p>}
-            <button className="primary" disabled={busy || !!pending || !valid || !!readError || view.submissionsOpen === false}>
+            <button className="primary" disabled={busy || !!pending || !valid || !validReduction || !!readError || view.submissionsOpen === false}>
               {busy ? 'Processing…' : 'Place virtual order'}</button>
           </form> : <p className="options-empty">Select an active {futures ? 'contract' : 'call or put'} to place an order.</p>}
         </section>

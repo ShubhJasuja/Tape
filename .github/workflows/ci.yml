@@ -36,4 +36,4 @@ jobs:
           java-version: '21'
           cache: maven
       - name: Verify Java 21 backend and PostgreSQL 17 integrations
-        run: ./mvnw --batch-mode clean verify -Dtape.postgres.tests=true
+        run: ./mvnw --batch-mode clean verify -Dtape.postgres.tests=true -Dtape.browser.tests=true

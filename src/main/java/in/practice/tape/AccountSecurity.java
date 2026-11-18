@@ -74,6 +74,8 @@ class AccountSecurity {
                                         PasswordEncoder encoder, Environment environment, AuthRequestBudget authBudget,
                                         TradingMetrics metrics) throws Exception {
         boolean local = environment.acceptsProfiles(Profiles.of("accounts-local"));
+        if (local && environment.acceptsProfiles(Profiles.of("beta")))
+            throw new IllegalStateException("Private beta cannot use local authentication or insecure cookies");
         if (environment.acceptsProfiles(Profiles.of("h2-legacy", "postgres-dev"))) {
             throw new IllegalStateException("Select accounts without a legacy database profile.");
         }

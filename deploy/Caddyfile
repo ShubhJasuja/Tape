@@ -1,0 +1,16 @@
+{$TAPE_BETA_HOST:localhost} {
+    @operations path /actuator* /internal*
+    respond @operations 404
+    reverse_proxy app:8080 {
+        header_up -Forwarded
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+    }
+    header {
+        Referrer-Policy no-referrer
+        X-Content-Type-Options nosniff
+    }
+}
+http://{$TAPE_BETA_HOST:localhost} {
+    redir https://{$TAPE_BETA_HOST:localhost}:{$TAPE_BETA_HTTPS_PORT:8443}{uri} 308
+}

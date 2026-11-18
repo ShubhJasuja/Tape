@@ -72,4 +72,6 @@ See the [public launch checklist](docs/public-launch.md) for the multi-instance 
 
 The [identity readiness guide](docs/identity-readiness.md) covers verified email, password recovery, shared-session revocation, SMTP configuration, and PostgreSQL backup and restore checks.
 
+The [private beta runbook](docs/private-beta.md) covers closed/allowlisted registration, Brevo SMTP setup, the backup-gated V4-to-V12 upgrade, a loopback-only Compose deployment and the complete Chrome/STARTTLS test journey. See [Stage 2M validation](docs/stage-2m-validation.md) for actual migration and test results. CI runs the PostgreSQL suite and Chrome journey with provider access disabled.
+
 **Resume bullet:** Built an Indian-equity paper trading terminal with React, Spring Boot, and PostgreSQL, with an isolated virtual order ledger, a permission-gated market-data adapter tested against fixtures, and local AI summaries of computed research metrics.

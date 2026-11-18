@@ -634,6 +634,7 @@ class AccountSecurityTest {
         }
         settings.put("TAPE_RECONCILIATION_SCHEDULED", false);
         settings.put("tape.identity.mail.enabled", false);
+        settings.put("TAPE_REGISTRATION_MODE", "PUBLIC"); // Explicitly open only these disposable test fixtures.
         settings.putAll(overrides);
         Object mail = settings.remove("TEST_MAIL_SENDER");
         return new SpringApplicationBuilder(Tape.class).profiles(profiles)
