@@ -3,6 +3,15 @@ node_modules/
 dist/
 data/
 .env*
+*.env
+*.env.*
+*.age
+*.dump
+*.dump.age.json
+*.identity
+*.p12
+*.pem
+*.key
 *.log
 .taste-skill/
 *.mv.db

@@ -74,4 +74,6 @@ The [identity readiness guide](docs/identity-readiness.md) covers verified email
 
 The [private beta runbook](docs/private-beta.md) covers closed/allowlisted registration, Brevo SMTP setup, the backup-gated V4-to-V12 upgrade, a loopback-only Compose deployment and the complete Chrome/STARTTLS test journey. See [Stage 2M validation](docs/stage-2m-validation.md) for actual migration and test results. CI runs the PostgreSQL suite and Chrome journey with provider access disabled.
 
+For invited remote access, use the [remote beta checklist](docs/remote-beta.md): explicit 80/443 ingress configuration, release tags, secret-safe preflight, real sender setup, encrypted off-host backups, monitoring and restart/recovery. Defaults remain loopback-only; no host or public deployment is created automatically.
+
 **Resume bullet:** Built an Indian-equity paper trading terminal with React, Spring Boot, and PostgreSQL, with an isolated virtual order ledger, a permission-gated market-data adapter tested against fixtures, and local AI summaries of computed research metrics.

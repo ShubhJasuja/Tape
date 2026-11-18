@@ -88,6 +88,12 @@ try {
   await wait(body('Market watch'),'equity terminal');
   await click('Place paper buy');
   await wait('document.querySelector("#portfolio tbody")?.innerText.includes("NSE:")','equity position');
+  assert.ok(await page.eval(body('Unrealized P&L')));
+  assert.ok(await page.eval(body('Realized P&L')));
+  await click('Orders');
+  await wait('document.querySelector("#portfolio tbody")?.innerText.includes("FILLED")','equity order history');
+  await page.eval('[...document.querySelectorAll("#portfolio button")].find(button=>button.textContent.trim().startsWith("Positions")).click()');
+  await wait('document.querySelector("#portfolio tbody")?.innerText.includes("NSE:")','equity positions return');
   await click('Options practice');
   await wait(body('Options chain'),'option chain');
   await wait(body('No open options positions.'),'option account');
@@ -95,6 +101,7 @@ try {
   await wait('document.querySelector("#practice-positions").closest("section").querySelector("td")?.textContent === "+1"','option buy');
   await click('Sell'); await click('Place virtual order');
   await wait(body('No open options positions.'),'option close');
+  await wait('document.querySelector("#practice-orders").closest("section").querySelectorAll("tbody tr").length === 2','option trade history');
   await click('Futures practice');
   await wait(body('Futures contracts'),'futures chain');
   await wait(body('No open futures positions.'),'futures account');
@@ -102,6 +109,8 @@ try {
   await wait('!!document.querySelector("#practice-positions").closest("section").querySelector("td")','futures position');
   await click('Review close'); await click('Place virtual order');
   await wait(body('No open futures positions.'),'futures close');
+  await wait('document.querySelector("#practice-orders").closest("section").querySelectorAll("tbody tr").length === 2','futures trade history');
+  assert.ok(await page.eval(body('Realized P&L')));
   await wait('document.querySelector(".options-ticket button.primary").disabled','flat reduce-only ticket is blocked');
   assert.ok(await page.eval(body('turn off Reduce position only')));
   assert.ok(await page.eval(body('Variation and transaction journal')));

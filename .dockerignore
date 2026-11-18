@@ -1,6 +1,11 @@
 .git
 .env*
 **/.env*
+**/*.env
+**/*.env.*
+**/*.age
+**/*.dump.age.json
+**/*.identity
 **/*.p12
 **/*.key
 **/*.pem
